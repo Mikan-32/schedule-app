@@ -93,14 +93,21 @@ def _param_size(details: dict) -> float:
     return value if m.group(2).lower() == "b" else value / 1000
 
 
-def rank_models(tags: list[dict]) -> list[str]:
-    """インストール済みモデルを精度が高いと見込まれる順に並べる。"""
+def rank_models(tags: list[dict], thinking: Optional[set[str]] = None) -> list[str]:
+    """インストール済みモデルを精度が高いと見込まれる順に並べる。
+
+    thinking に入っているモデル（思考型）は、同じ順位のモデルの中で後ろに回す。
+    例: qwen3-vl:8b（思考型。think=false でも考え込む）より qwen3-vl:8b-instruct を先にする。
+    CPU だけの PC では思考に数分かかり、精査が実用にならないため。
+    """
+    thinking = thinking or set()
 
     def key(m: dict):
         rank = _preference_rank(m["name"])
+        think = m["name"] in thinking
         if rank is not None:
-            return (0, rank, 0.0)
-        return (1, 0, -_param_size(m.get("details", {})))
+            return (0, rank, think, 0.0)
+        return (1, 0, think, -_param_size(m.get("details", {})))
 
     return [m["name"] for m in sorted(tags, key=key)]
 
@@ -188,7 +195,16 @@ class OllamaClient:
                 return sel
 
             sel.installed = [m["name"] for m in tags]
-            ranked = rank_models(tags)
+            thinking: set[str] = set()
+            if not self.settings.llm_think:
+                # 思考モードを使わない設定なら、考え込まないモデルを優先する
+                for m in tags:
+                    try:
+                        if "thinking" in await self.capabilities(m["name"]):
+                            thinking.add(m["name"])
+                    except Exception:
+                        pass
+            ranked = rank_models(tags, thinking)
 
             if self.settings.ollama_model != "auto":
                 sel.text_model = self.settings.ollama_model
@@ -211,7 +227,7 @@ class OllamaClient:
                     sel.vision_model = name
 
             if not sel.text_model:
-                sel.error = "利用できるモデルがありません。`ollama pull qwen3-vl:8b` などでモデルを取得してください。"
+                sel.error = "利用できるモデルがありません。`ollama pull qwen3-vl:8b-instruct` などでモデルを取得してください。"
             log.info("LLM選択: text=%s vision=%s", sel.text_model, sel.vision_model)
             self.selection = sel
             return sel

@@ -61,7 +61,7 @@ copy .env.example .env      # 中身を編集
 ### 1. ローカルLLM を用意する
 
 ```powershell
-ollama pull qwen3-vl:8b     # 画像対応・日本語OK。多くのPCで動く標準的な選択
+ollama pull qwen3-vl:8b-instruct     # 画像対応・日本語OK。多くのPCで動く標準的な選択
 ```
 
 `OLLAMA_MODEL=auto`（既定）の場合、インストール済みのモデルから次の優先順で自動選択します
@@ -73,12 +73,16 @@ ollama pull qwen3-vl:8b     # 画像対応・日本語OK。多くのPCで動く�
 | 2 | `qwen3.6:35b` / `qwen3.6:27b` | 24GB〜 | 画像対応 |
 | 3 | `qwen3-vl:32b` / `qwen3-vl:30b` | 24GB〜 | 画像内文字認識(OCR)が強い |
 | 4 | `gemma3:27b` | 24GB〜 | 画像対応 |
-| 5 | `qwen3-vl:8b` | 8GB〜 | **一般的なノートPC向けのおすすめ** |
+| 5 | `qwen3-vl:8b-instruct` | 8GB〜 | **一般的なノートPC向けのおすすめ** |
 | 6 | `gemma3:12b` / `qwen3:14b` | 8〜12GB | |
 | 7 | `qwen3-vl:4b` / `qwen3:8b` / `gemma3:4b` / `qwen3-vl:2b` | 4GB〜 | 低スペック向け |
 
 リストにないモデルはパラメータ数の大きい順に選ばれます。モデルを追加したら Web UI 下部の「再検出」を押してください。
 精度を上げたい場合は `.env` で `LLM_THINK=true`（思考モード。遅くなります）。
+
+> **`-instruct` 付きを選んでください。** `qwen3-vl:8b` のようにタグを省くと思考型（`-thinking`）が入り、
+> `LLM_THINK=false` でも毎回長く考えてから答えます。GPU のない PC では 1 件に数分かかります。
+> 両方入っている場合、`LLM_THINK=false` なら自動選択は考え込まない方を優先します。
 
 ### 2. Windows 通知を読む設定（Bot 不要）
 

@@ -35,6 +35,36 @@ def test_rank_models():
     ]
 
 
+def test_rank_models_prefers_non_thinking_variant():
+    tags = [
+        {"name": "qwen3-vl:8b", "details": {"parameter_size": "8.8B"}},
+        {"name": "qwen3-vl:4b-instruct", "details": {"parameter_size": "4.4B"}},
+        {"name": "qwen3-vl:8b-instruct", "details": {"parameter_size": "8.8B"}},
+    ]
+    # 同じ順位（qwen3-vl:8b 系）の中では思考型を後ろへ。下位のモデルより前には出さない
+    assert rank_models(tags, {"qwen3-vl:8b"}) == ["qwen3-vl:8b-instruct", "qwen3-vl:8b", "qwen3-vl:4b-instruct"]
+    assert rank_models(tags) == ["qwen3-vl:8b", "qwen3-vl:8b-instruct", "qwen3-vl:4b-instruct"]
+
+
+async def test_selection_avoids_thinking_model_unless_llm_think():
+    tags = [
+        {"name": "qwen3-vl:8b", "details": {"parameter_size": "8.8B"}},
+        {"name": "qwen3-vl:8b-instruct", "details": {"parameter_size": "8.8B"}},
+    ]
+    caps = {"qwen3-vl:8b": ["completion", "vision", "tools", "thinking"], "qwen3-vl:8b-instruct": ["completion", "vision", "tools"]}
+    client = OllamaClient(Settings(), transport=make_transport(tags, caps, {}, []))
+    sel = await client.refresh_selection()
+    assert sel.text_model == "qwen3-vl:8b-instruct" and sel.vision_model == "qwen3-vl:8b-instruct"
+    await client.aclose()
+
+    settings = Settings()
+    settings.llm_think = True
+    client = OllamaClient(settings, transport=make_transport(tags, caps, {}, []))
+    sel = await client.refresh_selection()
+    assert sel.text_model == "qwen3-vl:8b"
+    await client.aclose()
+
+
 def make_transport(tags, caps, chat_reply, captured):
     def handler(request: httpx.Request):
         if request.url.path == "/api/tags":
