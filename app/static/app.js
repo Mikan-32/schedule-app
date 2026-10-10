@@ -58,8 +58,10 @@ function sourceMeta(ev) {
   if (ev.source === "discord") {
     const from = [ev.source_channel, ev.source_author].filter(Boolean).map(esc).join(" ・ ");
     parts.push(ev.source_url ? `<a href="${esc(ev.source_url)}" target="_blank" rel="noopener">Discord</a> ${from}` : `Discord ${from}`);
-  } else if (ev.source_channel) {
-    parts.push(esc(ev.source_channel));
+  } else {
+    const from = [ev.source_channel, ev.source_author].filter(Boolean).map(esc).join(" ・ ");
+    if (ev.source === "winnotify") parts.push(`通知 ${from}`);
+    else if (from) parts.push(from);
   }
   return parts.join(" ・ ");
 }
@@ -90,7 +92,7 @@ function empty(glyph, title, text) {
 // ---------- render ----------
 async function renderEvents() {
   const events = await api("/api/events");
-  if (!events.length) return empty("○", "予定はありません", "Discord のメッセージから予定が見つかるとここに表示されます");
+  if (!events.length) return empty("○", "予定はありません", "Discord などのメッセージや通知から予定が見つかるとここに表示されます");
   const today = state.status?.today || new Date().toISOString().slice(0, 10);
   const byDate = new Map();
   for (const ev of events) {
@@ -165,14 +167,22 @@ function renderStatus() {
   const items = [`<span class="item"><span class="light ${llm.available ? "ok" : "ng"}"></span>${llmText}
       <button class="text-button" id="refresh-llm">再検出</button></span>`];
 
+  const STATE = { connected: "接続中", listening: "監視中", connecting: "接続しています…", starting: "開始しています…", reconnecting: "再接続中…", error: "エラー", stopped: "停止" };
+  const lightOf = (state) => (state === "connected" || state === "listening" ? "ok" : state === "error" ? "ng" : "wait");
+
+  const win = s.connectors.find((c) => c.name === "windows_notifications");
+  if (win) {
+    const backend = { winrt: "通知API", database: "通知データベース" }[win.backend] || "";
+    const extra = win.error ? ` — ${esc(win.error)}` : `（${esc(win.apps.join(", "))}${backend ? ` / ${backend}` : ""}）`;
+    items.push(`<span class="item"><span class="light ${lightOf(win.state)}"></span>Windows通知: ${STATE[win.state] || esc(win.state)}${extra}</span>`);
+  }
+
   const discord = s.connectors.find((c) => c.name === "discord");
-  if (!discord) {
-    items.push(`<span class="item"><span class="light"></span>Discord: 未設定（.env に DISCORD_BOT_TOKEN）</span>`);
-  } else {
-    const label = { connected: "接続中", connecting: "接続しています…", reconnecting: "再接続中…", error: "エラー", stopped: "停止" }[discord.state] || discord.state;
-    const light = discord.state === "connected" ? "ok" : discord.state === "error" ? "ng" : "wait";
+  if (discord) {
     const extra = discord.error ? ` — ${esc(discord.error)}` : !discord.owner_configured ? "（DISCORD_OWNER_ID 未設定のため DM 通知なし）" : "";
-    items.push(`<span class="item"><span class="light ${light}"></span>Discord: ${label}${extra}</span>`);
+    items.push(`<span class="item"><span class="light ${lightOf(discord.state)}"></span>Discord Bot: ${STATE[discord.state] || esc(discord.state)}${extra}</span>`);
+  } else if (!win) {
+    items.push(`<span class="item"><span class="light"></span>連絡ツール: 未接続（.env を設定してください）</span>`);
   }
   $("#statusbar").innerHTML = items.join("");
 }
