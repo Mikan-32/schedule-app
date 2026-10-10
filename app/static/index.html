@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>スケジュール</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="navbar">
+    <div class="navbar-inner">
+      <div>
+        <p class="eyebrow" id="today-label"></p>
+        <h1 class="large-title">スケジュール</h1>
+      </div>
+      <button class="icon-button filled" id="open-sheet" aria-label="予定を追加" title="予定を追加">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </div>
+    <nav class="segmented" role="tablist">
+      <button role="tab" class="segment active" data-tab="events">予定</button>
+      <button role="tab" class="segment" data-tab="pending">確認待ち<span class="badge orange" id="pending-badge" hidden></span></button>
+      <button role="tab" class="segment" data-tab="notifications">通知<span class="badge" id="unread-badge" hidden></span></button>
+    </nav>
+  </header>
+
+  <main id="content" class="content" aria-live="polite"></main>
+
+  <footer class="statusbar" id="statusbar"></footer>
+
+  <!-- 追加シート -->
+  <div class="sheet-backdrop" id="sheet" hidden>
+    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet-header">
+        <button class="text-button" id="close-sheet">キャンセル</button>
+        <h2 id="sheet-title">予定を追加</h2>
+        <span class="spacer"></span>
+      </div>
+      <nav class="segmented small" id="sheet-tabs">
+        <button class="segment active" data-mode="analyze">メッセージを解析</button>
+        <button class="segment" data-mode="manual">手動で入力</button>
+      </nav>
+
+      <form id="analyze-form" class="sheet-body">
+        <div class="group">
+          <textarea name="text" rows="6" placeholder="Discord などのメッセージを貼り付け&#10;例: 来週水曜の15時から定例ミーティングです。場所は会議室Aで。"></textarea>
+          <div class="row file-row">
+            <label class="text-button">
+              <input type="file" name="images" accept="image/*" multiple hidden>画像を選択
+            </label>
+            <span class="secondary" id="file-names">画像なし</span>
+          </div>
+        </div>
+        <p class="footnote">ローカルLLMで精査し、予定が見つかれば登録します。</p>
+        <button class="primary-button" type="submit"><span class="spinner" hidden></span><span class="label">解析する</span></button>
+        <div id="analyze-result"></div>
+      </form>
+
+      <form id="manual-form" class="sheet-body" hidden>
+        <div class="group">
+          <label class="row field"><span>タイトル</span><input name="title" required placeholder="定例ミーティング"></label>
+          <label class="row field"><span>日付</span><input name="date" type="date" required></label>
+          <label class="row field"><span>開始</span><input name="start_time" type="time"></label>
+          <label class="row field"><span>終了</span><input name="end_time" type="time"></label>
+          <label class="row field"><span>場所</span><input name="location" placeholder="任意"></label>
+        </div>
+        <p class="footnote">開始時刻を空欄にすると終日の予定になります。</p>
+        <button class="primary-button" type="submit"><span class="label">追加</span></button>
+      </form>
+    </section>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
