@@ -6,7 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.llm.ollama_client import LLMUnavailable, OllamaClient, rank_models
-from app.llm.prompts import build_calendar
+from app.llm.prompts import SYSTEM_PROMPT, build_calendar
 from app.models import ImageInput
 
 TAGS = [
@@ -125,3 +125,10 @@ def test_calendar_labels():
     assert cal[1] == "2026-10-11(日) 明日 今週"
     assert cal[2] == "2026-10-12(月) 明後日 来週"
     assert cal[9] == "2026-10-19(月) 再来週"
+
+
+def test_system_prompt_extracts_invitations():
+    # 誘い・提案も日付が分かれば予定として扱う（利用者の返事は Windows 通知では見えないため）
+    assert "明日遊ぼう" in SYSTEM_PROMPT
+    assert "仮定や検討中の話は抽出しない" not in SYSTEM_PROMPT
+    assert "15日と16日どっちがいい？" in SYSTEM_PROMPT  # 候補日が決まっていない話は引き続き抽出しない

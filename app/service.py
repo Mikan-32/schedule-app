@@ -287,6 +287,7 @@ class ScheduleService:
                 outcome.results.append(res)
         if not outcome.results:
             outcome.skipped = notes[0] if notes else "予定は見つかりませんでした"
+            log.info("予定として登録しませんでした（%s）: %s", outcome.skipped, " ".join(msg.text.split())[:60])
         return outcome
 
     # ---------- 再精査キュー ----------
