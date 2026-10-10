@@ -127,6 +127,12 @@ class Notifier:
             Notification(kind="resolved", message=message, event_id=change.event_id, change_id=change.id)
         )
 
+    async def skipped(self, event: Event) -> Notification:
+        """他の人の予定として見送ったとき（Web UI のみ。「追加する」で登録できる）。"""
+        who = " ・ ".join(x for x in (event.source_channel, event.source_author) if x)
+        message = f"他の人の予定として見送りました: {format_event_line(event)}" + (f"（{who}）" if who else "")
+        return self._record(Notification(kind="skipped", message=message, event_id=event.id))
+
     async def merged_into(self, event: Event) -> Notification:
         """確認待ちの予定を、新しい情報なしで既存の予定にまとめたとき（Web UI のみ）。"""
         message = f"同じ予定としてまとめました: {format_event_line(event)}"

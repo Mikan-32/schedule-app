@@ -92,6 +92,17 @@ class Settings:
         default_factory=lambda: Path(os.environ["WINDOWS_NOTIFY_DB_PATH"]) if os.getenv("WINDOWS_NOTIFY_DB_PATH") else None
     )
 
+    # --- 文脈・自分宛ての判定 ---
+    # あなたの名前（表示名・ニックネームなど、メンションや呼びかけで使われるもの。カンマ区切り）
+    my_names: list[str] = field(
+        default_factory=lambda: [n.strip() for n in os.getenv("MY_NAMES", "").split(",") if n.strip()]
+    )
+    # 同じチャンネル（DM は相手ごと）の直前のメッセージを、何件・何分前までLLM に参考として渡すか
+    context_messages: int = field(default_factory=lambda: _int("CONTEXT_MESSAGES", 8))
+    context_minutes: int = field(default_factory=lambda: _int("CONTEXT_MINUTES", 180))
+    # はっきり他の人だけの予定だと判断したとき: skip（登録せず通知に残す）/ add（区別せず登録）
+    others_mode: str = field(default_factory=lambda: os.getenv("OTHERS_MODE", "skip").strip().lower())
+
     # --- 取りこぼし対策 ---
     # ローカルLLM で精査できなかったメッセージを、何秒ごとに再精査するか
     queue_retry_sec: float = field(default_factory=lambda: _float("QUEUE_RETRY_SEC", 60.0))

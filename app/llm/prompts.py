@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from ..formatting import WEEKDAYS_JA
-from ..models import EXTRACTION_SCHEMA, Event
+from ..models import EXTRACTION_SCHEMA, ContextMessage, Event
 
 SYSTEM_PROMPT = """あなたはチャットメッセージ（と添付画像）から予定・スケジュールを抽出するアシスタントです。
 次のルールに厳密に従い、指定のJSONのみを出力してください。
@@ -17,6 +17,19 @@ SYSTEM_PROMPT = """あなたはチャットメッセージ（と添付画像）�
 - 雑談、過去の出来事の報告、日付を特定できないもの、仮定や検討中の話は抽出しない。
 - 該当がなければ events は空配列 [] にする。
 - 1つのメッセージに複数の予定があれば、すべて別々に抽出する。
+
+# 文脈（直前のやり取り・返信先）
+- 【直前のやり取り】【返信先のメッセージ】は、【メッセージ本文】を理解するための参考情報。
+- 抽出するのは【メッセージ本文】によって決まった・変わった・取り消された予定だけ。
+  例: 直前に「来週の定例、15日と16日どっちがいい？」→ 本文「15日で決定です」なら、15日の定例を抽出する。
+  例: 直前に「明日14時から打ち合わせでどうですか」→ 本文「了解です、それでお願いします」なら、明日14時の打ち合わせを抽出する。
+- 本文が予定と関係ない、または直前のやり取りの中だけで完結している予定（本文で何も決まっていない）は抽出しない。
+
+# 誰の予定か（audience）
+- me: 【利用者】本人が参加・対応する予定。利用者とのDM、利用者の名前へのメンション・呼びかけ、利用者自身の発言など。
+- all: グループ・チャンネル全員向けの予定。「皆さん」「全員」「各自」「@everyone」「@here」、全体への連絡など。
+- others: 利用者以外の特定の人だけの予定。「田中さんは15日に面談です」のように、利用者の名前が出てこない個人宛ての予定。
+- unknown: どちらとも判断できない。迷ったら unknown にする（others にするのは、はっきり他の人だけの予定のときに限る）。
 
 # 新しい予定か、登録済みの予定の変更・取り消しか（action）
 - 【登録済みの予定】に、すでに登録されている今後の予定が「#番号 日付 時刻 タイトル」の形で載っている。
@@ -84,6 +97,15 @@ def format_existing(events: Optional[list[Event]]) -> str:
     return "\n".join(lines)
 
 
+def format_context(context: Optional[list[ContextMessage]], tz) -> str:
+    lines = []
+    for c in context or []:
+        t = c.sent_at.astimezone(tz)
+        body = " ".join(c.text.split())[:300]
+        lines.append(f"{t.month}/{t.day} {t.strftime('%H:%M')} {c.author or '（不明）'}: {body}")
+    return "\n".join(lines)
+
+
 def build_user_prompt(
     text: str,
     sent_at: datetime,
@@ -91,19 +113,29 @@ def build_user_prompt(
     channel: str = "",
     image_count: int = 0,
     existing: Optional[list[Event]] = None,
+    context: Optional[list[ContextMessage]] = None,
+    reply_to: str = "",
+    my_names: Optional[list[str]] = None,
 ) -> str:
     base = f"{sent_at.strftime('%Y-%m-%d')}({WEEKDAYS_JA[sent_at.weekday()]}) {sent_at.strftime('%H:%M')}"
+    names = " / ".join(my_names or [])
     parts = [
+        f"【利用者】{names}（この名前へのメンション「@名前」や呼びかけは利用者宛て）" if names else "【利用者】（名前は未設定）",
         f"【基準日時】{base}（メッセージ送信日時, {sent_at.tzname() or ''}）",
     ]
     if author:
         parts.append(f"【送信者】{author}")
     if channel:
-        parts.append(f"【チャンネル】{channel}")
+        dm = "（利用者との1対1のメッセージ）" if channel.endswith("DM") else ""
+        parts.append(f"【チャンネル】{channel}{dm}")
     if image_count:
         parts.append(f"【添付画像】{image_count}枚")
     parts.append("【参照カレンダー】\n" + build_calendar(sent_at))
     parts.append("【登録済みの予定】\n" + format_existing(existing))
+    if context:
+        parts.append("【直前のやり取り】（同じ場所の直前のメッセージ。古い順。参考情報）\n" + format_context(context, sent_at.tzinfo))
+    if reply_to.strip():
+        parts.append("【返信先のメッセージ】\n" + " ".join(reply_to.split())[:500])
     parts.append("【メッセージ本文】\n" + (text.strip() or "（本文なし。画像のみ）"))
     parts.append("上記から予定を抽出し、JSONで出力してください。")
     return "\n\n".join(parts)

@@ -19,7 +19,7 @@ from typing import Optional
 import httpx
 
 from ..config import Settings
-from ..models import EXTRACTION_SCHEMA, Event, ExtractionResult, ImageInput
+from ..models import EXTRACTION_SCHEMA, ContextMessage, Event, ExtractionResult, ImageInput
 from .prompts import SYSTEM_PROMPT, build_user_prompt
 
 log = logging.getLogger(__name__)
@@ -231,6 +231,8 @@ class OllamaClient:
         channel: str = "",
         images: Optional[list[ImageInput]] = None,
         existing: Optional[list[Event]] = None,
+        context: Optional[list[ContextMessage]] = None,
+        reply_to: str = "",
     ) -> ExtractionResult:
         sel = await self.ensure_selection()
         if not sel.available:
@@ -247,7 +249,9 @@ class OllamaClient:
 
         user_msg: dict = {
             "role": "user",
-            "content": build_user_prompt(text, sent_at, author, channel, len(images), existing),
+            "content": build_user_prompt(
+                text, sent_at, author, channel, len(images), existing, context, reply_to, self.settings.my_names
+            ),
         }
         if images:
             user_msg["images"] = [prepare_image(img, self.settings.max_image_side) for img in images]

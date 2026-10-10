@@ -27,6 +27,25 @@ class IncomingMessage:
     channel: str = ""
     url: str = ""
     images: list[ImageInput] = field(default_factory=list)
+    thread: str = ""  # 同じ会話の目印（空なら source + channel から決める）
+    reply_to: str = ""  # 返信先のメッセージ（「送信者: 本文」）
+
+
+def thread_key(msg: IncomingMessage) -> str:
+    """直前のやり取りをまとめる単位。チャンネルごと、DM は相手ごと。"""
+    if msg.thread:
+        return msg.thread
+    base = f"{msg.source}|{msg.channel}"
+    return f"{base}|{msg.author}" if msg.channel.endswith("DM") else base
+
+
+@dataclass
+class ContextMessage:
+    """LLM に参考として渡す、同じ会話の直前のメッセージ。"""
+
+    author: str
+    text: str
+    sent_at: datetime
 
 
 class ExtractedEvent(BaseModel):
@@ -35,6 +54,8 @@ class ExtractedEvent(BaseModel):
     # add: 新しい予定 / same: 登録済みの予定と同じ（再掲・リマインド）
     # update: 登録済みの予定の変更 / cancel: 登録済みの予定の取り消し
     action: str = "add"
+    # 誰の予定か。me: 利用者本人 / all: 全員向け / others: 利用者以外の特定の人だけ / unknown
+    audience: str = "unknown"
     target_id: int = 0  # same / update / cancel の対象（【登録済みの予定】の #番号）。不明なら 0
     target_title: str = ""  # 対象の予定の元のタイトル（target_id が不明なとき用）
     target_date: str = ""  # 対象の予定の元の日付 YYYY-MM-DD（同上）
@@ -54,6 +75,14 @@ class ExtractedEvent(BaseModel):
             digits = value.strip().lstrip("#＃").strip()
             return int(digits) if digits.isdigit() else 0
         return value or 0
+
+    @field_validator("audience", mode="before")
+    @classmethod
+    def _lenient_audience(cls, value):
+        value = str(value or "unknown").strip().lower()
+        aliases = {"self": "me", "user": "me", "everyone": "all", "group": "all", "other": "others", "someone": "others"}
+        value = aliases.get(value, value)
+        return value if value in ("me", "all", "others", "unknown") else "unknown"
 
     @field_validator("action", mode="before")
     @classmethod
@@ -82,6 +111,7 @@ EXTRACTION_SCHEMA: dict = {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["add", "same", "update", "cancel"]},
+                    "audience": {"type": "string", "enum": ["me", "all", "others", "unknown"]},
                     "target_id": {"type": "integer"},
                     "target_title": {"type": "string"},
                     "target_date": {"type": "string"},
@@ -94,7 +124,7 @@ EXTRACTION_SCHEMA: dict = {
                     "confidence": {"type": "number"},
                 },
                 "required": [
-                    "action", "target_id", "target_title", "target_date",
+                    "action", "audience", "target_id", "target_title", "target_date",
                     "title", "date", "start_time", "end_time", "location", "description", "confidence",
                 ],
             },
@@ -112,7 +142,7 @@ class Event:
     end_time: Optional[time] = None
     location: str = ""
     description: str = ""
-    status: str = "confirmed"  # confirmed / pending / rejected / cancelled / merged
+    status: str = "confirmed"  # confirmed / pending / rejected / cancelled / merged / skipped（他の人の予定として見送り）
     source: str = "manual"
     source_message_id: str = ""
     source_author: str = ""
@@ -232,7 +262,7 @@ class EventChange:
 
 @dataclass
 class Notification:
-    kind: str  # added / conflict / resolved / info / updated / cancelled / merged / change_pending / undone
+    kind: str  # added / conflict / resolved / info / updated / cancelled / merged / change_pending / undone / skipped
     message: str
     event_id: Optional[int] = None
     change_id: Optional[int] = None

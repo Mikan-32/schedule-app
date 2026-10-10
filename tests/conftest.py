@@ -9,6 +9,8 @@ import pytest
 os.environ["GOOGLE_CALENDAR"] = "false"
 os.environ["PREVENT_SLEEP"] = "off"
 os.environ["WINDOWS_NOTIFICATIONS"] = "false"
+os.environ["MY_NAMES"] = ""
+os.environ["OTHERS_MODE"] = "skip"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -26,8 +28,17 @@ class FakeExtractor:
         self.events = events or []
         self.calls = []
 
-    async def extract(self, text, sent_at, author="", channel="", images=None, existing=None):
-        self.calls.append({"text": text, "sent_at": sent_at, "images": images or [], "existing": existing or []})
+    async def extract(self, text, sent_at, author="", channel="", images=None, existing=None, context=None, reply_to=""):
+        self.calls.append(
+            {
+                "text": text,
+                "sent_at": sent_at,
+                "images": images or [],
+                "existing": existing or [],
+                "context": context or [],
+                "reply_to": reply_to,
+            }
+        )
         return ExtractionResult(events=[ExtractedEvent(**e) for e in self.events])
 
 

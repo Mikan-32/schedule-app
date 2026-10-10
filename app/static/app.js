@@ -166,7 +166,7 @@ async function renderNotifications() {
       ${list.map((n) => `
         <div class="row notif-row">
           <span class="dot ${esc(n.kind)} ${n.read ? "read" : ""}"></span>
-          <div class="msg">${esc(n.message)}${n.undoable ? `<button class="text-button undo" data-undo="${n.change_id}">元に戻す</button>` : ""}</div>
+          <div class="msg">${esc(n.message)}${n.undoable ? `<button class="text-button undo" data-undo="${n.change_id}">元に戻す</button>` : ""}${n.adoptable ? `<button class="text-button undo" data-adopt="${n.event_id}">自分の予定として追加する</button>` : ""}</div>
           <span class="when">${timeAgo(n.created_at)}</span>
         </div>`).join("")}
     </div>`;
@@ -273,6 +273,11 @@ document.addEventListener("click", async (e) => {
       await api(`/api/events/${t.dataset.reject}/reject`, { method: "POST" });
       toast("追加しませんでした");
       await Promise.all([render(), refreshStatus()]);
+    } else if (t.dataset.adopt) {
+      const res = await api(`/api/events/${t.dataset.adopt}/adopt`, { method: "POST" });
+      const ADOPTED = { added: "予定に追加しました", pending: "同日の予定と重なるため「確認待ち」に入りました", merged: "登録済みの同じ予定にまとめました", duplicate: "既に登録済みです" };
+      toast(ADOPTED[res.status] || "追加しました");
+      await Promise.all([render(), refreshStatus()]);
     } else if (t.dataset.merge) {
       await api(`/api/events/${t.dataset.merge}/merge?into=${t.dataset.mergeInto}`, { method: "POST" });
       toast("同じ予定としてまとめました");
@@ -338,7 +343,7 @@ $("#analyze-form [type=file]").addEventListener("change", (e) => {
   $("#file-names").textContent = names.length ? names.join(", ") : "画像なし";
 });
 
-const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み", merged: "まとめた", updated: "変更", cancelled: "取り消し", change_pending: "確認待ち" };
+const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み", merged: "まとめた", updated: "変更", cancelled: "取り消し", change_pending: "確認待ち", skipped: "見送り" };
 
 $("#analyze-form").addEventListener("submit", async (e) => {
   e.preventDefault();

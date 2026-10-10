@@ -129,6 +129,17 @@ async def reject(request: Request, event_id: int):
         raise HTTPException(404, "予定が見つかりません")
 
 
+@router.post("/events/{event_id}/adopt")
+async def adopt(request: Request, event_id: int):
+    """他の人の予定として見送った予定を、自分の予定として登録する。"""
+    try:
+        return (await _ctx(request).service.adopt(event_id)).to_dict()
+    except KeyError:
+        raise HTTPException(404, "予定が見つかりません")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 @router.post("/events/{event_id}/merge")
 async def merge(request: Request, event_id: int, into: Optional[int] = None):
     """確認待ちの予定を「同じ予定」として既存の予定にまとめる（into 省略時は一番近い候補）。"""
@@ -177,6 +188,8 @@ async def notifications(request: Request, limit: int = 100):
         d["undoable"] = bool(
             n.change_id and n.kind in ("updated", "cancelled", "merged") and ctx.service.is_undoable(n.change_id)
         )
+        ev = ctx.db.get_event(n.event_id) if n.kind == "skipped" and n.event_id else None
+        d["adoptable"] = bool(ev and ev.status == "skipped")  # 見送った予定を「追加する」で登録できる
         items.append(d)
     return items
 

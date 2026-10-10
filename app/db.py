@@ -4,11 +4,11 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
-from .models import Event, EventChange, ImageInput, IncomingMessage, Notification
+from .models import ContextMessage, Event, EventChange, ImageInput, IncomingMessage, Notification
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS message_queue (
     author TEXT NOT NULL DEFAULT '',
     channel TEXT NOT NULL DEFAULT '',
     url TEXT NOT NULL DEFAULT '',
+    thread TEXT NOT NULL DEFAULT '',
+    reply_to TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'waiting',
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT NOT NULL DEFAULT '',
@@ -88,6 +90,19 @@ CREATE TABLE IF NOT EXISTS message_queue_images (
     data BLOB NOT NULL,
     PRIMARY KEY (queue_id, idx)
 );
+
+-- 同じ会話の直前のメッセージ（LLM に文脈として渡す。古いものは自動で消す）
+CREATE TABLE IF NOT EXISTS recent_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_key TEXT NOT NULL,
+    source TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    author TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    UNIQUE (source, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_recent_thread ON recent_messages(thread_key, sent_at);
 
 -- Google カレンダーから消す必要がある予定（アプリ側で削除された予定）
 CREATE TABLE IF NOT EXISTS gcal_tombstones (
@@ -114,6 +129,8 @@ MIGRATIONS = [
     ("events", "gcal_event_id", "TEXT"),
     ("events", "gcal_hash", "TEXT"),
     ("notifications", "change_id", "INTEGER"),
+    ("message_queue", "thread", "TEXT NOT NULL DEFAULT ''"),
+    ("message_queue", "reply_to", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
@@ -464,7 +481,7 @@ class Database:
         with self._lock:
             cur = self._conn.execute(
                 """INSERT OR IGNORE INTO message_queue (source, message_id, text, sent_at, author, channel, url,
-                   attempts, last_error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                   thread, reply_to, attempts, last_error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     msg.source,
                     msg.message_id,
@@ -473,6 +490,8 @@ class Database:
                     msg.author,
                     msg.channel,
                     msg.url,
+                    msg.thread,
+                    msg.reply_to,
                     int(count_attempt),
                     error[:500],
                     self._now(),
@@ -504,6 +523,8 @@ class Database:
                     author=r["author"],
                     channel=r["channel"],
                     url=r["url"],
+                    thread=r["thread"],
+                    reply_to=r["reply_to"],
                     images=[ImageInput(data=bytes(i["data"]), mime=i["mime"], filename=i["filename"]) for i in imgs],
                 )
                 items.append((r["id"], msg))
@@ -540,6 +561,37 @@ class Database:
             cur = self._conn.execute("UPDATE message_queue SET status = 'waiting', attempts = 0 WHERE status = 'failed'")
             self._conn.commit()
             return cur.rowcount
+
+    # ---------- 直前のやり取り ----------
+    def remember_message(self, key: str, msg: IncomingMessage, keep_minutes: int) -> None:
+        """会話の文脈として、受け取ったメッセージを覚えておく（keep_minutes より古いものは消す）。"""
+        if not msg.text.strip():
+            return
+        sent = msg.sent_at.astimezone(timezone.utc)
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=max(keep_minutes, 60))).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO recent_messages (thread_key, source, message_id, author, text, sent_at)
+                   VALUES (?,?,?,?,?,?)""",
+                (key, msg.source, msg.message_id, msg.author, msg.text[:1000], sent.isoformat()),
+            )
+            self._conn.execute("DELETE FROM recent_messages WHERE sent_at < ?", (cutoff,))
+            self._conn.commit()
+
+    def recent_context(
+        self, key: str, before: datetime, minutes: int, limit: int, exclude_message_id: str = ""
+    ) -> list[ContextMessage]:
+        """同じ会話で before より前（minutes 分以内）のメッセージを、古い順に最大 limit 件返す。"""
+        end = before.astimezone(timezone.utc)
+        start = end - timedelta(minutes=minutes)
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT author, text, sent_at FROM recent_messages
+                   WHERE thread_key = ? AND sent_at <= ? AND sent_at >= ? AND message_id != ?
+                   ORDER BY sent_at DESC, id DESC LIMIT ?""",
+                (key, end.isoformat(), start.isoformat(), exclude_message_id, limit),
+            ).fetchall()
+        return [ContextMessage(r["author"], r["text"], datetime.fromisoformat(r["sent_at"])) for r in reversed(rows)]
 
     # ---------- processed messages ----------
     def mark_processed(self, source: str, message_id: str) -> bool:

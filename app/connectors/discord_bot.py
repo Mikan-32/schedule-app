@@ -220,6 +220,15 @@ class DiscordConnector(Connector):
         channel_ids = {message.channel.id, getattr(message.channel, "parent_id", None)}
         return bool(channel_ids & set(watch))
 
+    @staticmethod
+    def _reply_text(message: discord.Message) -> str:
+        """返信先のメッセージ（「送信者: 本文」）。取得できなければ空。"""
+        ref = message.reference
+        resolved = getattr(ref, "resolved", None) if ref else None
+        if isinstance(resolved, discord.Message) and resolved.content:
+            return f"{resolved.author.display_name}: {resolved.content}"[:500]
+        return ""
+
     async def _collect(self, message: discord.Message) -> tuple[str, list[ImageInput]]:
         texts = [message.content]
         attachments = list(message.attachments)
@@ -255,6 +264,8 @@ class DiscordConnector(Connector):
             channel=channel,
             url=message.jump_url,
             images=images,
+            thread=f"discord|{message.channel.id}",  # スレッドもチャンネルIDで区別される
+            reply_to=self._reply_text(message),
         )
         try:
             if is_dm:

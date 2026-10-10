@@ -13,6 +13,7 @@ from .config import Settings
 from .db import Database
 from .llm import LLMUnavailable
 from .models import (
+    ContextMessage,
     Event,
     EventChange,
     ExtractedEvent,
@@ -20,6 +21,7 @@ from .models import (
     ImageInput,
     IncomingMessage,
     event_fields,
+    thread_key,
     with_fields,
 )
 from .notifier import Notifier
@@ -32,6 +34,13 @@ _DATE_HINT = re.compile(
     r"[月火水木金土日]曜|午前|午後|正午|朝|昼|夕方|夜|日程|予定|締切|締め切り|〆切|期限|"
     r"ミーティング|MTG|mtg|会議|打ち合わせ|打合せ|面談|面接|集合|イベント|飲み会|授業|講義|試験|テスト|"
     r"中止|延期|キャンセル|取り消|取消|取りやめ|取り止め|変更|リスケ|順延|前倒し|なくなり|無くなり|休講"
+)
+
+# 「了解」「それで」など、直前のやり取りで出た予定を決める・受けるだけの返事
+_FOLLOWUP = re.compile(
+    r"(?i)(?<![a-z])ok(?![a-z])|オッケ|おっけ|了解|りょ|承知|かしこまり|それで|そこで|決定|決まり|確定|大丈夫|"
+    r"いいよ|いいね|いいです|賛成|お願いします|よろしく|行けます|いけます|行きます|参加|欠席|行けない|いけない|無理|"
+    r"👍|🙆|⭕|🆗"
 )
 
 # 変更・取り消しの対象を探すとき、LLM に渡す登録済みの予定の範囲
@@ -48,12 +57,14 @@ class Extractor(Protocol):
         channel: str = "",
         images: Optional[list[ImageInput]] = None,
         existing: Optional[list[Event]] = None,
+        context: Optional[list[ContextMessage]] = None,
+        reply_to: str = "",
     ) -> ExtractionResult: ...
 
 
 @dataclass
 class EventResult:
-    # added / pending / duplicate / merged / updated / cancelled / change_pending
+    # added / pending / duplicate / merged / updated / cancelled / change_pending / skipped
     status: str
     event: Event
     conflicts: list[Event] = field(default_factory=list)
@@ -80,6 +91,11 @@ class AnalysisOutcome:
 
 def looks_like_schedule(text: str) -> bool:
     return bool(_DATE_HINT.search(text or ""))
+
+
+def is_followup(text: str) -> bool:
+    """予定の提案に対する返事（「了解」「それでお願いします」など）らしいか。"""
+    return bool(_FOLLOWUP.search(text or ""))
 
 
 def _parse_time(value: str) -> Optional[time]:
@@ -198,12 +214,15 @@ class ScheduleService:
             return AnalysisOutcome(skipped="処理済みのメッセージです")
         if not msg.text.strip() and not msg.images:
             return AnalysisOutcome(skipped="本文も画像もありません")
-        if self.settings.prefilter and not msg.images and not looks_like_schedule(msg.text):
+        context = self._context(msg)
+        if not force:
+            self.db.remember_message(thread_key(msg), msg, keep_minutes=self.settings.context_minutes * 2)
+        if self.settings.prefilter and not msg.images and not self._worth_analyzing(msg, context):
             return AnalysisOutcome(skipped="日付や予定に関する表現が見つかりませんでした")
 
         candidates = self.change_candidates()
         try:
-            result = await self._extract(msg, candidates)
+            result = await self._extract(msg, candidates, context)
         except Exception as e:
             if force:  # 画面からの解析は、その場でエラーを返す
                 raise
@@ -213,7 +232,28 @@ class ScheduleService:
             return AnalysisOutcome(skipped="ローカルLLM で精査できなかったため、つながったら自動でやり直します", queued=True)
         return await self._apply_result(result, msg, candidates)
 
-    async def _extract(self, msg: IncomingMessage, candidates: list[Event]) -> ExtractionResult:
+    def _context(self, msg: IncomingMessage) -> list[ContextMessage]:
+        """同じ会話（チャンネル・DM の相手）の直前のメッセージ。"""
+        if self.settings.context_messages <= 0:
+            return []
+        return self.db.recent_context(
+            thread_key(msg),
+            before=msg.sent_at,
+            minutes=self.settings.context_minutes,
+            limit=self.settings.context_messages,
+            exclude_message_id=msg.message_id,
+        )
+
+    @staticmethod
+    def _worth_analyzing(msg: IncomingMessage, context: list[ContextMessage]) -> bool:
+        """LLM に送る価値があるか。日時の表現があるか、予定の話の流れでの返事なら送る。"""
+        if looks_like_schedule(msg.text) or looks_like_schedule(msg.reply_to):
+            return True
+        return is_followup(msg.text) and any(looks_like_schedule(c.text) for c in context)
+
+    async def _extract(
+        self, msg: IncomingMessage, candidates: list[Event], context: Optional[list[ContextMessage]] = None
+    ) -> ExtractionResult:
         return await self.extractor.extract(
             text=msg.text,
             sent_at=msg.sent_at.astimezone(self.settings.tz),
@@ -221,6 +261,8 @@ class ScheduleService:
             channel=msg.channel,
             images=msg.images,
             existing=candidates,
+            context=context or [],
+            reply_to=msg.reply_to,
         )
 
     async def _apply_result(self, result: ExtractionResult, msg: IncomingMessage, candidates: list[Event]) -> AnalysisOutcome:
@@ -235,7 +277,12 @@ class ScheduleService:
                 res = await self.handle_same(raw, msg, candidates)
             else:
                 event = self.validate(raw, msg)
-                res = await self.add_event(event) if event else None
+                if event is None:
+                    res = None
+                elif raw.audience == "others" and self.settings.others_mode == "skip":
+                    res = await self.skip_for_others(event)  # はっきり他の人だけの予定 → 登録せず通知に残す
+                else:
+                    res = await self.add_event(event)
             if res:
                 outcome.results.append(res)
         if not outcome.results:
@@ -252,7 +299,7 @@ class ScheduleService:
             for qid, msg in self.db.list_queue("waiting"):
                 candidates = self.change_candidates()
                 try:
-                    result = await self._extract(msg, candidates)
+                    result = await self._extract(msg, candidates, self._context(msg))
                 except LLMUnavailable as e:
                     self.db.queue_failed(qid, str(e), None)  # 回数には数えない
                     break
@@ -364,6 +411,10 @@ class ScheduleService:
 
     async def add_event(self, event: Event, same_as_id: Optional[int] = None) -> EventResult:
         """予定を登録する。同じ予定が既にあればまとめ、時間が重なる予定があれば確認待ちにする。"""
+        return await self._place(event, same_as_id=same_as_id)
+
+    async def _place(self, event: Event, same_as_id: Optional[int] = None, existing: bool = False) -> EventResult:
+        """add_event の本体。existing=True なら DB にある予定（見送った予定など）の状態を変える。"""
         change: Optional[EventChange] = None
         async with self._save_lock:
             same = self.db.get_event(same_as_id) if same_as_id else None
@@ -371,10 +422,15 @@ class ScheduleService:
                 same = self.find_same(event)
             if same:
                 merged, change = self._merge_locked(same, event)
+                if existing:
+                    self.db.set_status(event.id, "merged")
             else:
                 conflicts, likely_same = self._sorted_conflicts(event, self.find_conflicts(event))
                 event.status = "pending" if conflicts else "confirmed"
-                self.db.add_event(event)
+                if existing:
+                    self.db.set_status(event.id, event.status)
+                else:
+                    self.db.add_event(event)
 
         if same:
             if change is None:
@@ -387,6 +443,28 @@ class ScheduleService:
             return EventResult(status="pending", event=event, conflicts=conflicts)
         await self.notifier.added(event)
         return EventResult(status="added", event=event)
+
+    # ---------- 他の人の予定 ----------
+    async def skip_for_others(self, event: Event) -> EventResult:
+        """他の人だけの予定は登録せず、「見送り」として残す（あとから「追加する」で登録できる）。"""
+        async with self._save_lock:
+            for e in self.db.list_events(statuses=("skipped",), on_date=event.date):
+                if _times_compatible(e, event) and _similar(e.title, event.title):
+                    return EventResult(status="duplicate", event=e)  # 同じものを見送り済み
+            event.status = "skipped"
+            self.db.add_event(event)
+        log.info("他の人の予定として見送りました: %s %s", event.date, event.title)
+        await self.notifier.skipped(event)
+        return EventResult(status="skipped", event=event)
+
+    async def adopt(self, event_id: int) -> EventResult:
+        """見送った予定を、自分の予定として登録する。"""
+        event = self.db.get_event(event_id)
+        if event is None:
+            raise KeyError(event_id)
+        if event.status != "skipped":
+            raise ValueError("この予定は既に処理されています")
+        return await self._place(event, existing=True)
 
     async def handle_same(self, raw: ExtractedEvent, msg: IncomingMessage, candidates: list[Event]) -> Optional[EventResult]:
         """LLM が「登録済みの予定と同じ」と判断した連絡。日時が矛盾しなければその予定にまとめる。"""
