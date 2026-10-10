@@ -21,6 +21,13 @@ if (-not (Test-Path $Pythonw)) {
     $Pythonw = $cmd.Source
 }
 
+# 必要なライブラリが入っているか先に確かめる（入っていないと、画面が出ないまま起動に失敗するため）
+$Python = Join-Path (Split-Path -Parent $Pythonw) "python.exe"
+& $Python -c "import importlib.util as u, sys; sys.exit(0 if all(u.find_spec(m) for m in ('uvicorn', 'fastapi', 'httpx')) else 1)"
+if ($LASTEXITCODE -ne 0) {
+    throw "必要なライブラリが入っていません（$Python）。先に次を実行してください:`n  python -m venv .venv`n  .venv\Scripts\python.exe -m pip install -r requirements.txt"
+}
+
 $User = "$env:USERDOMAIN\$env:USERNAME"
 $Action = New-ScheduledTaskAction -Execute $Pythonw -Argument "run.py" -WorkingDirectory $AppDir
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $User
