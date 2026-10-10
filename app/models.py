@@ -32,9 +32,10 @@ class IncomingMessage:
 class ExtractedEvent(BaseModel):
     """LLMが返す1件分の予定（検証前）。"""
 
-    # add: 新しい予定 / update: 登録済みの予定の変更 / cancel: 登録済みの予定の取り消し
+    # add: 新しい予定 / same: 登録済みの予定と同じ（再掲・リマインド）
+    # update: 登録済みの予定の変更 / cancel: 登録済みの予定の取り消し
     action: str = "add"
-    target_id: int = 0  # update / cancel の対象（【登録済みの予定】の #番号）。不明なら 0
+    target_id: int = 0  # same / update / cancel の対象（【登録済みの予定】の #番号）。不明なら 0
     target_title: str = ""  # 対象の予定の元のタイトル（target_id が不明なとき用）
     target_date: str = ""  # 対象の予定の元の日付 YYYY-MM-DD（同上）
     title: str = ""
@@ -58,9 +59,13 @@ class ExtractedEvent(BaseModel):
     @classmethod
     def _lenient_action(cls, value):
         value = str(value or "add").strip().lower()
-        aliases = {"delete": "cancel", "remove": "cancel", "change": "update", "modify": "update", "reschedule": "update"}
+        aliases = {
+            "delete": "cancel", "remove": "cancel",
+            "change": "update", "modify": "update", "reschedule": "update",
+            "duplicate": "same", "reminder": "same", "repeat": "same", "existing": "same",
+        }
         value = aliases.get(value, value)
-        return value if value in ("add", "update", "cancel") else "add"
+        return value if value in ("add", "same", "update", "cancel") else "add"
 
 
 class ExtractionResult(BaseModel):
@@ -76,7 +81,7 @@ EXTRACTION_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["add", "update", "cancel"]},
+                    "action": {"type": "string", "enum": ["add", "same", "update", "cancel"]},
                     "target_id": {"type": "integer"},
                     "target_title": {"type": "string"},
                     "target_date": {"type": "string"},
@@ -107,7 +112,7 @@ class Event:
     end_time: Optional[time] = None
     location: str = ""
     description: str = ""
-    status: str = "confirmed"  # confirmed / pending / rejected / cancelled
+    status: str = "confirmed"  # confirmed / pending / rejected / cancelled / merged
     source: str = "manual"
     source_message_id: str = ""
     source_author: str = ""
@@ -186,7 +191,7 @@ class EventChange:
     """メッセージから見つかった、登録済みの予定への変更・取り消し。"""
 
     event_id: int
-    kind: str  # update / cancel
+    kind: str  # update / cancel / merge（同じ予定の連絡から情報を補った）
     before: dict  # event_fields() の形（反映前）
     after: dict = field(default_factory=dict)  # event_fields() の形（update のみ）
     status: str = "pending"  # pending / applied / rejected / undone
@@ -224,7 +229,7 @@ class EventChange:
 
 @dataclass
 class Notification:
-    kind: str  # added / conflict / resolved / info / updated / cancelled / change_pending / undone
+    kind: str  # added / conflict / resolved / info / updated / cancelled / merged / change_pending / undone
     message: str
     event_id: Optional[int] = None
     change_id: Optional[int] = None

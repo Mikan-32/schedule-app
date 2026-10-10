@@ -29,11 +29,17 @@ MAX_IMAGES = 4
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 
 
-class ConflictButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sched:(?P<action>confirm|reject):(?P<id>\d+)"):
+class ConflictButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sched:(?P<action>confirm|reject|merge):(?P<id>\d+)"):
     """重複確認ボタン。custom_id にイベントIDを持たせ、Bot 再起動後も押せるようにする。"""
 
+    LABELS = {
+        "confirm": ("追加する", discord.ButtonStyle.primary),
+        "reject": ("追加しない", discord.ButtonStyle.secondary),
+        "merge": ("同じ予定（まとめる）", discord.ButtonStyle.secondary),
+    }
+
     def __init__(self, action: str, event_id: int):
-        label, style = ("追加する", discord.ButtonStyle.primary) if action == "confirm" else ("追加しない", discord.ButtonStyle.secondary)
+        label, style = self.LABELS[action]
         super().__init__(discord.ui.Button(label=label, style=style, custom_id=f"sched:{action}:{event_id}"))
         self.action = action
         self.event_id = event_id
@@ -52,11 +58,18 @@ class ConflictButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sched
             await interaction.response.edit_message(content=f"{original}\n-# この予定は削除されています", view=None)
             return
         if event.status != "pending":
-            state = {"confirmed": "追加済み", "cancelled": "取り消し済み"}.get(event.status, "追加しないを選択済み")
+            state = {"confirmed": "追加済み", "cancelled": "取り消し済み", "merged": "まとめ済み"}.get(event.status, "追加しないを選択済み")
             await interaction.response.edit_message(content=f"{original}\n-# この予定は既に処理されています（{state}）", view=None)
             return
 
-        if self.action == "confirm":
+        if self.action == "merge":
+            try:
+                await service.merge_pending(self.event_id)
+            except ValueError as e:
+                await interaction.response.edit_message(content=f"{original}\n-# まとめられませんでした（{e}）", view=None)
+                return
+            await interaction.response.edit_message(content=f"{original}\n→ **同じ予定としてまとめました**", view=None)
+        elif self.action == "confirm":
             await interaction.response.edit_message(content=f"{original}\n→ **追加しました**", view=None)
             await service.confirm(self.event_id)
         else:
@@ -298,6 +311,7 @@ class DiscordConnector(Connector):
             return
         view = discord.ui.View(timeout=None)
         view.add_item(ConflictButton("confirm", event.id))
+        view.add_item(ConflictButton("merge", event.id))  # 先頭の重なる予定（いちばん同じ予定らしいもの）にまとめる
         view.add_item(ConflictButton("reject", event.id))
         first, *rest = message.split("\n")
         body = f"**確認: {first}**\n" + "\n".join(rest) + f"\n{self._details(event)}"
@@ -309,8 +323,8 @@ class DiscordConnector(Connector):
             return
         view = discord.ui.View(timeout=None)
         view.add_item(ChangeButton("undo", change.id))
-        head = "予定を取り消しました" if change.kind == "cancel" else "予定を変更しました"
-        await owner.send(f"{head}\n**{message}**\n{self._details(event)}", view=view)
+        head = {"cancel": "予定を取り消しました\n", "update": "予定を変更しました\n"}.get(change.kind, "")
+        await owner.send(f"{head}**{message}**\n{self._details(event)}", view=view)
 
     async def notify_change_pending(self, change: EventChange, event: Event, message: str) -> None:
         owner = await self._owner()

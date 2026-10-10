@@ -108,6 +108,17 @@ async def reject(request: Request, event_id: int):
         raise HTTPException(404, "予定が見つかりません")
 
 
+@router.post("/events/{event_id}/merge")
+async def merge(request: Request, event_id: int, into: Optional[int] = None):
+    """確認待ちの予定を「同じ予定」として既存の予定にまとめる（into 省略時は一番近い候補）。"""
+    try:
+        return (await _ctx(request).service.merge_pending(event_id, into)).to_dict()
+    except KeyError:
+        raise HTTPException(404, "予定が見つかりません")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 @router.post("/changes/{change_id}/apply")
 async def apply_change(request: Request, change_id: int):
     """確認待ちの変更・取り消しを反映する。"""
@@ -142,7 +153,9 @@ async def notifications(request: Request, limit: int = 100):
     items = []
     for n in ctx.db.list_notifications(limit):
         d = n.to_dict()
-        d["undoable"] = bool(n.change_id and n.kind in ("updated", "cancelled") and ctx.service.is_undoable(n.change_id))
+        d["undoable"] = bool(
+            n.change_id and n.kind in ("updated", "cancelled", "merged") and ctx.service.is_undoable(n.change_id)
+        )
         items.append(d)
     return items
 

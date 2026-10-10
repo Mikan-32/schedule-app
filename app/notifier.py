@@ -13,6 +13,7 @@ from .formatting import (
     format_change_pending_message,
     format_conflict_message,
     format_event_line,
+    format_merged_message,
     format_updated_message,
 )
 from .models import Event, EventChange, Notification, with_fields
@@ -58,8 +59,8 @@ class Notifier:
                 log.exception("通知の送信に失敗しました (%s)", sink.name)
         return n
 
-    async def conflict(self, event: Event, conflicts: list[Event]) -> Notification:
-        message = format_conflict_message(event, conflicts)
+    async def conflict(self, event: Event, conflicts: list[Event], likely_same: bool = False) -> Notification:
+        message = format_conflict_message(event, conflicts, likely_same)
         n = self.db.add_notification(Notification(kind="conflict", message=message, event_id=event.id))
         for sink in self.sinks:
             try:
@@ -84,10 +85,12 @@ class Notifier:
                 log.exception("通知の送信に失敗しました (%s.%s)", sink.name, method)
 
     async def changed(self, change: EventChange, event: Event) -> Notification:
-        """自動で、または承認されて反映された変更・取り消し。"""
+        """自動で、または承認されて反映された変更・取り消し・まとめ。"""
         before = _before_event(change, event)
         if change.kind == "cancel":
             kind, message = "cancelled", format_cancelled_message(before)
+        elif change.kind == "merge":
+            kind, message = "merged", format_merged_message(before, event)
         else:
             kind, message = "updated", format_updated_message(before, event)
         n = self.db.add_notification(Notification(kind=kind, message=message, event_id=event.id, change_id=change.id))
@@ -111,6 +114,11 @@ class Notifier:
         return self.db.add_notification(
             Notification(kind="resolved", message=message, event_id=change.event_id, change_id=change.id)
         )
+
+    async def merged_into(self, event: Event) -> Notification:
+        """確認待ちの予定を、新しい情報なしで既存の予定にまとめたとき（Web UI のみ）。"""
+        message = f"同じ予定としてまとめました: {format_event_line(event)}"
+        return self.db.add_notification(Notification(kind="resolved", message=message, event_id=event.id))
 
     async def undone(self, change: EventChange, event: Event) -> Notification:
         message = f"元に戻しました: {format_event_line(event)}"

@@ -72,6 +72,20 @@ def format_updated_message(before: "Event", after: "Event") -> str:
     return f"{format_event_line(after)}に変更しました" + (f"（{'、'.join(details)}）" if details else "")
 
 
+def format_merged_message(before: "Event", after: "Event") -> str:
+    """例: 同じ予定の連絡をまとめました: 10月15日(木)14時から定例ミーティングに場所「会議室A」を追加"""
+    added = []
+    if before.start_time is None and after.start_time is not None:
+        added.append(f"時刻「{format_time_range(after)}」")
+    elif before.end_time != after.end_time and after.end_time is not None:
+        added.append(f"終了時刻「{after.end_time.strftime('%H:%M')}」")
+    if before.location != after.location:
+        added.append(f"場所「{after.location}」")
+    if before.description != after.description:
+        added.append("補足")
+    return f"同じ予定の連絡をまとめました: {format_event_line(after)}に{'・'.join(added) or '情報'}を追加"
+
+
 def format_cancelled_message(event: "Event") -> str:
     """例: 10月15日(木)14時から定例ミーティングを取り消しました"""
     return f"{format_event_line(event)}を取り消しました"
@@ -97,9 +111,14 @@ def format_change_pending_message(
     return "\n".join(lines)
 
 
-def format_conflict_message(event: "Event", conflicts: list["Event"]) -> str:
+def format_conflict_message(event: "Event", conflicts: list["Event"], likely_same: bool = False) -> str:
+    head = (
+        f"{format_date_ja(event.date)}に同じ予定があるかもしれません。追加しますか？"
+        if likely_same
+        else f"{format_date_ja(event.date)}は既に予定があります。追加しますか？"
+    )
     lines = [
-        f"{format_date_ja(event.date)}は既に予定があります。追加しますか？",
+        head,
         f"新しい予定: {format_event_line(event)}",
     ]
     for c in conflicts:
