@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from typing import Optional, Protocol
@@ -51,7 +52,7 @@ class Extractor(Protocol):
 
 @dataclass
 class EventResult:
-    # added / pending / duplicate / updated / cancelled / change_pending
+    # added / pending / duplicate / merged / updated / cancelled / change_pending
     status: str
     event: Event
     conflicts: list[Event] = field(default_factory=list)
@@ -99,13 +100,46 @@ def _parse_date(value: str) -> Optional[date]:
         return None
 
 
+# タイトルの表記ゆれをそろえる（同じ予定かどうかの判定用）
+_TITLE_SYNONYMS = [
+    (re.compile(r"ミーティング|ミーテイング|meeting|mtg|打ち合わせ|打ち合せ|打合わせ|打合せ"), "会議"),
+    (re.compile(r"締め切り|締切り|〆切り|〆切|しめきり|deadline"), "締切"),
+    (re.compile(r"リマインダー|リマインド|reminder|再掲|再送"), ""),
+]
+SIMILAR_THRESHOLD = 0.6
+
+
 def _normalize_title(title: str) -> str:
-    return re.sub(r"[\s　・、。,.!！?？「」『』()（）【】\-ー_~〜]", "", title).lower()
+    s = unicodedata.normalize("NFKC", title or "").lower()  # 全角英数・半角カナをそろえる
+    for pattern, repl in _TITLE_SYNONYMS:
+        s = pattern.sub(repl, s)
+    return re.sub(r"[\s・、。,.!?「」『』()\[\]【】\-ー_~〜:;/]", "", s)
+
+
+def _bigrams(s: str) -> set[str]:
+    return {s[i : i + 2] for i in range(len(s) - 1)} if len(s) > 1 else {s}
+
+
+def _title_score(a: str, b: str) -> float:
+    """タイトルの近さ (0〜1)。表記ゆれをそろえたうえで、一致・包含・文字の重なりで測る。"""
+    na, nb = _normalize_title(a), _normalize_title(b)
+    if not na or not nb:
+        return 0.0
+    if na == nb:
+        return 1.0
+    if min(len(na), len(nb)) >= 2 and (na in nb or nb in na):
+        return 0.9
+    ba, bb = _bigrams(na), _bigrams(nb)
+    return 2 * len(ba & bb) / (len(ba) + len(bb))
 
 
 def _similar(a: str, b: str) -> bool:
-    na, nb = _normalize_title(a), _normalize_title(b)
-    return bool(na and nb) and (na == nb or na in nb or nb in na)
+    return _title_score(a, b) >= SIMILAR_THRESHOLD
+
+
+def _times_compatible(a: Event, b: Event) -> bool:
+    """開始時刻が同じか、どちらかが時刻なし（終日・時刻未定）なら同じ予定でありうる。"""
+    return a.start_time is None or b.start_time is None or a.start_time == b.start_time
 
 
 class ScheduleService:
@@ -185,6 +219,8 @@ class ScheduleService:
                 res, note = await self.handle_change(raw, msg, candidates)
                 if note:
                     notes.append(note)
+            elif raw.action == "same":
+                res = await self.handle_same(raw, msg, candidates)
             else:
                 event = self.validate(raw, msg)
                 res = await self.add_event(event) if event else None
@@ -218,28 +254,134 @@ class ScheduleService:
         same_day = self.db.list_events(statuses=("confirmed", "pending"), on_date=event.date)
         return [e for e in same_day if e.id != event.id and self.overlaps(event, e)]
 
-    def find_duplicate(self, event: Event) -> Optional[Event]:
-        same_day = self.db.list_events(statuses=("confirmed", "pending"), on_date=event.date)
-        for e in same_day:
-            if e.start_time == event.start_time and _similar(e.title, event.title):
-                return e
-        return None
+    def find_same(self, event: Event) -> Optional[Event]:
+        """登録済みの同じ予定（同じ日・開始時刻が矛盾しない・タイトルが似ている）を探す。"""
+        best, best_key = None, None
+        for e in self.db.list_events(statuses=("confirmed", "pending"), on_date=event.date):
+            if e.id == event.id or not _times_compatible(e, event):
+                continue
+            score = _title_score(e.title, event.title)
+            if score < SIMILAR_THRESHOLD:
+                continue
+            key = (e.start_time == event.start_time, score)
+            if best_key is None or key > best_key:
+                best, best_key = e, key
+        return best
 
-    async def add_event(self, event: Event) -> EventResult:
+    def merge_candidate(self, event: Event, conflicts: list[Event]) -> Optional[Event]:
+        """重なっている予定のうち、同じ予定である可能性がいちばん高いもの（まとめる先の候補）。"""
+        if not conflicts:
+            return None
+        return max(conflicts, key=lambda c: (c.start_time == event.start_time, _title_score(c.title, event.title)))
+
+    def _sorted_conflicts(self, event: Event, conflicts: list[Event]) -> tuple[list[Event], bool]:
+        """まとめる先の候補を先頭にした重なる予定と、「同じ予定かもしれない」か。"""
+        cand = self.merge_candidate(event, conflicts)
+        if cand is None:
+            return conflicts, False
+        return [cand] + [c for c in conflicts if c.id != cand.id], cand.start_time == event.start_time
+
+    @staticmethod
+    def _merged(target: Event, incoming: Event) -> Optional[Event]:
+        """target に、incoming の情報のうち足りないものだけを補った予定。新しい情報がなければ None。"""
+        fill: dict = {}
+        if target.start_time is None and incoming.start_time is not None:
+            fill["start_time"], fill["end_time"] = incoming.start_time, incoming.end_time
+        elif (
+            target.start_time is not None
+            and target.end_time is None
+            and incoming.end_time is not None
+            and incoming.start_time in (None, target.start_time)
+            and incoming.end_time > target.start_time
+        ):
+            fill["end_time"] = incoming.end_time
+        if not target.location and incoming.location:
+            fill["location"] = incoming.location
+        if not target.description and incoming.description:
+            fill["description"] = incoming.description
+        return replace(target, **fill) if fill else None
+
+    def _merge_locked(self, target: Event, incoming: Event) -> tuple[Event, Optional[EventChange]]:
+        """同じ予定の連絡をまとめる（_save_lock 内で呼ぶ）。足りない情報があれば補い、変更履歴に残す。"""
+        merged = self._merged(target, incoming)
+        if merged is None:
+            return target, None
+        change = EventChange(
+            event_id=target.id,
+            kind="merge",
+            before=event_fields(target),
+            after=event_fields(merged),
+            source=incoming.source,
+            source_message_id=incoming.source_message_id,
+            source_author=incoming.source_author,
+            source_channel=incoming.source_channel,
+            source_url=incoming.source_url,
+            raw_text=incoming.raw_text,
+            confidence=incoming.confidence,
+        )
+        self.db.add_change(change)
+        return self._apply_locked(change, target), change
+
+    async def add_event(self, event: Event, same_as_id: Optional[int] = None) -> EventResult:
+        """予定を登録する。同じ予定が既にあればまとめ、時間が重なる予定があれば確認待ちにする。"""
+        change: Optional[EventChange] = None
         async with self._save_lock:
-            dup = self.find_duplicate(event)
-            if dup:
-                log.info("既に登録済みの予定のためスキップ: %s", dup.title)
-                return EventResult(status="duplicate", event=dup)
-            conflicts = self.find_conflicts(event)
-            event.status = "pending" if conflicts else "confirmed"
-            self.db.add_event(event)
+            same = self.db.get_event(same_as_id) if same_as_id else None
+            if same is None or same.status not in ("confirmed", "pending"):
+                same = self.find_same(event)
+            if same:
+                merged, change = self._merge_locked(same, event)
+            else:
+                conflicts, likely_same = self._sorted_conflicts(event, self.find_conflicts(event))
+                event.status = "pending" if conflicts else "confirmed"
+                self.db.add_event(event)
 
+        if same:
+            if change is None:
+                log.info("既に登録済みの予定のためスキップ: %s", same.title)
+                return EventResult(status="duplicate", event=same)
+            await self.notifier.changed(change, merged)
+            return EventResult(status="merged", event=merged, change=change)
         if conflicts:
-            await self.notifier.conflict(event, conflicts)
+            await self.notifier.conflict(event, conflicts, likely_same)
             return EventResult(status="pending", event=event, conflicts=conflicts)
         await self.notifier.added(event)
         return EventResult(status="added", event=event)
+
+    async def handle_same(self, raw: ExtractedEvent, msg: IncomingMessage, candidates: list[Event]) -> Optional[EventResult]:
+        """LLM が「登録済みの予定と同じ」と判断した連絡。日時が矛盾しなければその予定にまとめる。"""
+        target = {e.id: e for e in candidates}.get(raw.target_id) if raw.target_id else None
+        if target is not None and not (raw.date or "").strip():
+            raw = raw.model_copy(update={"date": target.date.isoformat()})
+        event = self.validate(raw, msg)
+        if event is None:
+            return None
+        if target is not None and event.date == target.date and _times_compatible(target, event):
+            return await self.add_event(event, same_as_id=target.id)
+        # LLM の判断と日時が食い違う → 新しい予定として扱う（似た予定があればそこで照合される）
+        return await self.add_event(event)
+
+    async def merge_pending(self, event_id: int, into_id: Optional[int] = None) -> Event:
+        """確認待ちの予定を「同じ予定」として既存の予定にまとめる。"""
+        async with self._save_lock:
+            ev = self.db.get_event(event_id)
+            if ev is None:
+                raise KeyError(event_id)
+            if ev.status != "pending":
+                raise ValueError("この予定は既に処理されています")
+            if into_id is not None:
+                target = self.db.get_event(into_id)
+            else:
+                target = self.merge_candidate(ev, self.find_conflicts(ev))
+            if target is None or target.id == ev.id or target.status not in ("confirmed", "pending"):
+                raise ValueError("まとめる先の予定が見つかりません")
+            merged, change = self._merge_locked(target, ev)
+            self.db.set_status(ev.id, "merged")
+        if change:
+            await self.notifier.changed(change, merged)
+        else:
+            await self.notifier.merged_into(merged)
+        return merged
 
     async def confirm(self, event_id: int) -> Event:
         event = self.db.get_event(event_id)
@@ -267,8 +409,16 @@ class ScheduleService:
         """確認待ちの一覧（重複した新しい予定 + あいまいな変更・取り消し）。"""
         items = []
         for ev in self.db.list_events(statuses=("pending",)):
-            others = [c for c in self.find_conflicts(ev)]
-            items.append({"kind": "add", "event": ev.to_dict(), "conflicts": [c.to_dict() for c in others]})
+            others, likely_same = self._sorted_conflicts(ev, self.find_conflicts(ev))
+            items.append(
+                {
+                    "kind": "add",
+                    "event": ev.to_dict(),
+                    "conflicts": [c.to_dict() for c in others],
+                    "merge_into": others[0].id if others else None,  # 「同じ予定としてまとめる」の行き先
+                    "likely_same": likely_same,
+                }
+            )
         for ch in self.db.list_changes(status="pending"):
             target = self.db.get_event(ch.event_id)
             if target is None or target.status in ("cancelled", "rejected"):

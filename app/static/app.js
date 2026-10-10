@@ -137,15 +137,20 @@ async function renderPending() {
   return items.map((item) => item.kind === "update" || item.kind === "cancel" ? changeCard(item) : addCard(item)).join("");
 }
 
-function addCard({ event, conflicts }) {
+function addCard({ event, conflicts, merge_into: mergeInto, likely_same: likelySame }) {
+  const heading = likelySame
+    ? `${dateLabel(event.date)}に同じ予定があるかもしれません`
+    : `${dateLabel(event.date)}は既に予定があります`;
   return `
     <div class="group pending-card">
-      <div class="heading">${dateLabel(event.date)}は既に予定があります</div>
+      <div class="heading">${heading}</div>
       ${eventRow(event, { deletable: false })}
       <div class="label-small">既存の予定</div>
       ${conflicts.map((c) => eventRow(c, { deletable: false })).join("") || `<div class="row secondary">（既存の予定は削除されました）</div>`}
       <div class="actions">
         <button class="secondary-button" data-reject="${event.id}">追加しない</button>
+        ${mergeInto ? `<button class="secondary-button" data-merge="${event.id}" data-merge-into="${mergeInto}"
+          title="${conflicts.length > 1 ? "一番上の既存の予定にまとめます" : "既存の予定にまとめます"}">同じ予定（まとめる）</button>` : ""}
         <button class="primary-button" data-confirm="${event.id}">追加する</button>
       </div>
     </div>`;
@@ -243,6 +248,10 @@ document.addEventListener("click", async (e) => {
       await api(`/api/events/${t.dataset.reject}/reject`, { method: "POST" });
       toast("追加しませんでした");
       await Promise.all([render(), refreshStatus()]);
+    } else if (t.dataset.merge) {
+      await api(`/api/events/${t.dataset.merge}/merge?into=${t.dataset.mergeInto}`, { method: "POST" });
+      toast("同じ予定としてまとめました");
+      await Promise.all([render(), refreshStatus()]);
     } else if (t.dataset.changeApply) {
       const res = await api(`/api/changes/${t.dataset.changeApply}/apply`, { method: "POST" });
       toast(res.status !== "applied" ? "対象の予定がなくなっていたため反映しませんでした" : res.kind === "cancel" ? "予定を取り消しました" : "予定を変更しました");
@@ -295,7 +304,7 @@ $("#analyze-form [type=file]").addEventListener("change", (e) => {
   $("#file-names").textContent = names.length ? names.join(", ") : "画像なし";
 });
 
-const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み", updated: "変更", cancelled: "取り消し", change_pending: "確認待ち" };
+const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み", merged: "まとめた", updated: "変更", cancelled: "取り消し", change_pending: "確認待ち" };
 
 $("#analyze-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -337,7 +346,8 @@ $("#manual-form").addEventListener("submit", async (e) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
-    toast(res.status === "pending" ? "同日の予定と重なるため「確認待ち」に入りました" : res.status === "duplicate" ? "既に登録済みです" : `追加しました: ${res.event.label}`);
+    const MESSAGES = { pending: "同日の予定と重なるため「確認待ち」に入りました", duplicate: "既に登録済みです", merged: "登録済みの同じ予定に情報を追加しました" };
+    toast(MESSAGES[res.status] || `追加しました: ${res.event.label}`);
     e.target.reset();
     closeSheet();
     await Promise.all([render(), refreshStatus()]);
