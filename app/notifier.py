@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Protocol
+from typing import Callable, Protocol
 
 from .db import Database
 from datetime import date
@@ -45,13 +45,25 @@ class Notifier:
     def __init__(self, db: Database):
         self.db = db
         self.sinks: list[NotificationSink] = []
+        # 予定が変わるたびに呼ぶ関数（Google カレンダーの同期を急がせる等）
+        self.listeners: list[Callable[[], None]] = []
 
     def register(self, sink: NotificationSink) -> None:
         self.sinks.append(sink)
 
+    def _record(self, n: Notification) -> Notification:
+        """Web UI の通知に記録し、予定の変更を listeners に知らせる。"""
+        n = self.db.add_notification(n)
+        for listener in self.listeners:
+            try:
+                listener()
+            except Exception:
+                log.exception("通知のリスナーでエラーが発生しました")
+        return n
+
     async def added(self, event: Event) -> Notification:
         message = format_added_message(event)
-        n = self.db.add_notification(Notification(kind="added", message=message, event_id=event.id))
+        n = self._record(Notification(kind="added", message=message, event_id=event.id))
         for sink in self.sinks:
             try:
                 await sink.notify_added(event, message)
@@ -61,7 +73,7 @@ class Notifier:
 
     async def conflict(self, event: Event, conflicts: list[Event], likely_same: bool = False) -> Notification:
         message = format_conflict_message(event, conflicts, likely_same)
-        n = self.db.add_notification(Notification(kind="conflict", message=message, event_id=event.id))
+        n = self._record(Notification(kind="conflict", message=message, event_id=event.id))
         for sink in self.sinks:
             try:
                 await sink.notify_conflict(event, conflicts, message)
@@ -71,7 +83,7 @@ class Notifier:
 
     async def rejected(self, event: Event) -> Notification:
         message = f"追加しませんでした: {format_event_line(event)}"
-        return self.db.add_notification(Notification(kind="resolved", message=message, event_id=event.id))
+        return self._record(Notification(kind="resolved", message=message, event_id=event.id))
 
     # ---------- 変更・取り消し ----------
     async def _each(self, method: str, *args) -> None:
@@ -93,7 +105,7 @@ class Notifier:
             kind, message = "merged", format_merged_message(before, event)
         else:
             kind, message = "updated", format_updated_message(before, event)
-        n = self.db.add_notification(Notification(kind=kind, message=message, event_id=event.id, change_id=change.id))
+        n = self._record(Notification(kind=kind, message=message, event_id=event.id, change_id=change.id))
         await self._each("notify_changed", change, event, message)
         return n
 
@@ -101,7 +113,7 @@ class Notifier:
         """あいまいな変更・取り消しの確認通知。"""
         after = with_fields(event, {k: v for k, v in change.after.items() if k != "status"}) if change.after else None
         message = format_change_pending_message(change.kind, event, after, conflicts, change.reason)
-        n = self.db.add_notification(
+        n = self._record(
             Notification(kind="change_pending", message=message, event_id=event.id, change_id=change.id)
         )
         await self._each("notify_change_pending", change, event, message)
@@ -111,17 +123,17 @@ class Notifier:
         before = _before_event(change, self.db.get_event(change.event_id))
         verb = "取り消しませんでした" if change.kind == "cancel" else "変更しませんでした"
         message = f"{verb}: {format_event_line(before)}"
-        return self.db.add_notification(
+        return self._record(
             Notification(kind="resolved", message=message, event_id=change.event_id, change_id=change.id)
         )
 
     async def merged_into(self, event: Event) -> Notification:
         """確認待ちの予定を、新しい情報なしで既存の予定にまとめたとき（Web UI のみ）。"""
         message = f"同じ予定としてまとめました: {format_event_line(event)}"
-        return self.db.add_notification(Notification(kind="resolved", message=message, event_id=event.id))
+        return self._record(Notification(kind="resolved", message=message, event_id=event.id))
 
     async def undone(self, change: EventChange, event: Event) -> Notification:
         message = f"元に戻しました: {format_event_line(event)}"
-        return self.db.add_notification(
+        return self._record(
             Notification(kind="undone", message=message, event_id=event.id, change_id=change.id)
         )

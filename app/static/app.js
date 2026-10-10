@@ -216,6 +216,31 @@ function renderStatus() {
   } else if (!win) {
     items.push(`<span class="item"><span class="light"></span>連絡ツール: 未接続（.env を設定してください）</span>`);
   }
+
+  const q = s.queue || {};
+  if (q.waiting) items.push(`<span class="item"><span class="light wait"></span>精査待ち ${q.waiting}件（ローカルLLMにつながったら自動で精査）</span>`);
+  if (q.failed) items.push(`<span class="item"><span class="light ng"></span>精査できなかったメッセージ ${q.failed}件
+      <button class="text-button" id="retry-queue">再試行</button></span>`);
+
+  const g = s.google || {};
+  const login = (label) => `<a href="/api/google/login" target="_blank" rel="noopener">${label}</a>`;
+  const GOOGLE = {
+    no_credentials: ["", "未設定（README の手順で credentials.json を置いてください）"],
+    bad_credentials: ["ng", "credentials.json を読み込めません"],
+    not_connected: ["wait", `未連携 ${login("連携する")}`],
+    connected: ["ok", `同期中（${g.synced ?? 0}件） <button class="text-button" id="google-disconnect">解除</button>`],
+    error: ["ng", `${esc(g.error)} ${login("再連携")}`],
+  };
+  if (g.state && g.state !== "disabled") {
+    const [light, text] = GOOGLE[g.state] || ["", esc(g.state)];
+    items.push(`<span class="item"><span class="light ${light}"></span>Googleカレンダー: ${text}</span>`);
+  }
+
+  const p = s.power || {};
+  if (p.supported && p.mode && p.mode !== "off") {
+    const text = p.active ? "有効" : p.mode === "ac" ? "待機中（バッテリー駆動）" : "無効";
+    items.push(`<span class="item"><span class="light ${p.active ? "ok" : ""}"></span>スリープ防止: ${text}</span>`);
+  }
   $("#statusbar").innerHTML = items.join("");
 }
 
@@ -267,6 +292,15 @@ document.addEventListener("click", async (e) => {
     } else if (t.id === "mark-read") {
       await api("/api/notifications/read", { method: "POST" });
       await Promise.all([render(), refreshStatus()]);
+    } else if (t.id === "retry-queue") {
+      const res = await api("/api/queue/retry", { method: "POST" });
+      toast(`${res.retried}件をもう一度精査します`);
+      await refreshStatus();
+    } else if (t.id === "google-disconnect") {
+      if (!confirm("Google カレンダーとの連携を解除しますか？（登録済みの予定は Google カレンダーに残ります）")) return;
+      await api("/api/google/disconnect", { method: "POST" });
+      toast("連携を解除しました");
+      await refreshStatus();
     } else if (t.id === "refresh-llm") {
       t.disabled = true;
       await api("/api/llm/refresh", { method: "POST" });

@@ -123,6 +123,8 @@ class Event:
     id: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    gcal_event_id: Optional[str] = None  # Google カレンダー側のイベントID（同期済みなら）
+    gcal_hash: Optional[str] = None  # 最後に同期した内容のハッシュ
 
     @property
     def all_day(self) -> bool:
@@ -149,6 +151,7 @@ class Event:
             "confidence": self.confidence,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "gcal_synced": bool(self.gcal_event_id),
             "label": format_event_line(self),
             "time_range": format_time_range(self),
         }

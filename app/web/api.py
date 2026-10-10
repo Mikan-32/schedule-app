@@ -1,13 +1,16 @@
 """Web UI 用の REST API。"""
 from __future__ import annotations
 
+import html
 import uuid
 from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
+from ..gcal import GoogleAuthError
 from ..llm import LLMUnavailable
 from ..models import Event, ImageInput, IncomingMessage
 from ..service import _parse_time
@@ -37,14 +40,29 @@ async def status(request: Request):
         "pending_count": ctx.service.pending_count(),
         "unread_count": ctx.db.unread_count(),
         "today": ctx.service.today().isoformat(),
+        "queue": ctx.db.queue_counts(),
+        "google": ctx.gcal.status() if ctx.gcal else {"state": "disabled"},
+        "power": ctx.sleep_guard.status() if ctx.sleep_guard else {"supported": False},
     }
 
 
 @router.post("/llm/refresh")
 async def refresh_llm(request: Request):
     ctx = _ctx(request)
-    await ctx.llm.refresh_selection()
+    sel = await ctx.llm.refresh_selection()
+    if sel.available and ctx.queue_task:
+        ctx.queue_task.kick()  # つながったら、精査できなかったメッセージをすぐ精査する
     return ctx.llm.status()
+
+
+@router.post("/queue/retry")
+async def retry_queue(request: Request):
+    """精査をあきらめたメッセージを、もう一度精査する。"""
+    ctx = _ctx(request)
+    n = ctx.db.retry_failed()
+    if ctx.queue_task:
+        ctx.queue_task.kick()
+    return {"retried": n}
 
 
 @router.get("/events")
@@ -82,8 +100,11 @@ async def create_event(request: Request, body: EventIn):
 
 @router.delete("/events/{event_id}")
 async def delete_event(request: Request, event_id: int):
-    if not _ctx(request).db.delete_event(event_id):
+    ctx = _ctx(request)
+    if not ctx.db.delete_event(event_id):
         raise HTTPException(404, "予定が見つかりません")
+    if ctx.gcal_task:
+        ctx.gcal_task.kick()  # Google カレンダーからも消す
     return {"ok": True}
 
 
@@ -193,3 +214,62 @@ async def analyze(request: Request, text: str = Form(""), images: list[UploadFil
     except Exception as e:
         raise HTTPException(500, f"精査に失敗しました: {e}")
     return outcome.to_dict()
+
+
+# ---------- Google カレンダー ----------
+def _page(title: str, message: str, ok: bool) -> HTMLResponse:
+    color = "#34c759" if ok else "#ff3b30"
+    body = f"""<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>{html.escape(title)}</title>
+<style>body{{font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic UI",sans-serif;background:#f2f2f7;
+display:grid;place-items:center;min-height:100vh;margin:0}}main{{background:#fff;border-radius:14px;padding:32px 36px;
+max-width:460px;text-align:center}}h1{{font-size:20px;color:{color}}}p{{color:#3c3c43;line-height:1.6}}a{{color:#007aff}}</style>
+</head><body><main><h1>{html.escape(title)}</h1><p>{html.escape(message)}</p><p><a href="/">スケジュールに戻る</a></p></main></body></html>"""
+    return HTMLResponse(body, status_code=200 if ok else 400)
+
+
+async def google_callback_page(gcal, code: Optional[str], state: str, error: Optional[str]) -> HTMLResponse:
+    try:
+        await gcal.complete_auth(code, state, error)
+    except GoogleAuthError as e:
+        return _page("連携できませんでした", str(e), ok=False)
+    return _page(
+        "Google カレンダーと連携しました",
+        f"確定した予定を「{gcal.settings.google_calendar_name}」カレンダーに登録します。このタブは閉じてかまいません。",
+        ok=True,
+    )
+
+
+def _gcal(request: Request):
+    gcal = _ctx(request).gcal
+    if gcal is None:
+        raise HTTPException(400, "Google カレンダー連携が無効です（.env の GOOGLE_CALENDAR と credentials.json を確認してください）")
+    return gcal
+
+
+@router.get("/google/login")
+async def google_login(request: Request):
+    """Google の許可画面へ移動する。許可すると http://127.0.0.1:<port>/ に戻ってくる。"""
+    ctx = _ctx(request)
+    if ctx.gcal is None or ctx.gcal.state in ("no_credentials", "bad_credentials"):
+        return _page(
+            "Google カレンダー連携の準備ができていません",
+            f"Google Cloud で作成した OAuth クライアント（デスクトップ アプリ）の JSON を "
+            f"{ctx.settings.google_credentials_path} に置いてから、アプリを再起動してください（README 参照）。",
+            ok=False,
+        )
+    redirect_uri = f"http://127.0.0.1:{ctx.settings.port}/"
+    return RedirectResponse(ctx.gcal.authorization_url(redirect_uri))
+
+
+@router.post("/google/disconnect")
+async def google_disconnect(request: Request):
+    gcal = _gcal(request)
+    await gcal.disconnect()
+    return gcal.status()
+
+
+@router.post("/google/sync")
+async def google_sync(request: Request):
+    gcal = _gcal(request)
+    await gcal.sync_once()
+    return gcal.status()
