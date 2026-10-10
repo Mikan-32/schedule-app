@@ -6,3 +6,10 @@ python-dotenv>=1.0
 python-multipart>=0.0.9
 Pillow>=10.0
 tzdata>=2024.1
+# Windows 通知の読み取り（Windows のみインストールされる）
+winrt-runtime>=2.2; sys_platform == "win32"
+winrt-Windows.Foundation>=2.2; sys_platform == "win32"
+winrt-Windows.Foundation.Collections>=2.2; sys_platform == "win32"
+winrt-Windows.ApplicationModel>=2.2; sys_platform == "win32"
+winrt-Windows.UI.Notifications>=2.2; sys_platform == "win32"
+winrt-Windows.UI.Notifications.Management>=2.2; sys_platform == "win32"

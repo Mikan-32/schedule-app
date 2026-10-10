@@ -142,6 +142,8 @@ class DiscordConnector(Connector):
             return False
         if message.guild is None:  # DM はオーナーからのものだけ
             return not self.settings.discord_owner_id or message.author.id == self.settings.discord_owner_id
+        if not self.settings.discord_read_channels:  # Windows 通知で読む場合など
+            return False
         watch = self.settings.discord_watch_channel_ids
         if not watch:
             return True

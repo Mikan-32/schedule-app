@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -64,6 +66,24 @@ class Settings:
     discord_owner_id: int = field(default_factory=lambda: _int("DISCORD_OWNER_ID", 0))
     # 空なら Bot が参加している全チャンネルを監視
     discord_watch_channel_ids: list[int] = field(default_factory=lambda: _id_list("DISCORD_WATCH_CHANNEL_IDS"))
+    # false にすると Bot はサーバーのチャンネルを読まず、DM 通知の送信（とBotへのDM/転送の精査）だけを行う
+    discord_read_channels: bool = field(default_factory=lambda: _bool("DISCORD_READ_CHANNELS", True))
+
+    # --- Windows 通知 (Bot 不要) ---
+    # auto: Windows なら有効 / true / false
+    windows_notifications: str = field(default_factory=lambda: os.getenv("WINDOWS_NOTIFICATIONS", "auto").strip().lower())
+    # 監視するアプリ（表示名または AppUserModelID の部分一致、カンマ区切り）
+    windows_notify_apps: list[str] = field(
+        default_factory=lambda: [a.strip() for a in os.getenv("WINDOWS_NOTIFY_APPS", "Discord").split(",") if a.strip()]
+    )
+    # auto: winrt を試して使えなければ database / winrt / database
+    windows_notify_backend: str = field(default_factory=lambda: os.getenv("WINDOWS_NOTIFY_BACKEND", "auto").strip().lower())
+    windows_notify_poll_sec: float = field(default_factory=lambda: _float("WINDOWS_NOTIFY_POLL_SEC", 2.0))
+    # 起動時に、直近何分以内の通知までさかのぼって精査するか
+    windows_notify_backfill_min: int = field(default_factory=lambda: _int("WINDOWS_NOTIFY_BACKFILL_MIN", 30))
+    windows_notify_db_path: Optional[Path] = field(
+        default_factory=lambda: Path(os.environ["WINDOWS_NOTIFY_DB_PATH"]) if os.getenv("WINDOWS_NOTIFY_DB_PATH") else None
+    )
 
     @property
     def tz(self) -> ZoneInfo:
@@ -72,6 +92,12 @@ class Settings:
     @property
     def discord_enabled(self) -> bool:
         return bool(self.discord_token)
+
+    @property
+    def windows_notifications_enabled(self) -> bool:
+        if self.windows_notifications == "auto":
+            return sys.platform == "win32"
+        return self.windows_notifications in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

@@ -1,30 +1,47 @@
 # スケジュール管理アプリ
 
-Discord に届いたメッセージ（文章・画像）をローカルLLMで精査し、予定を自動で登録するアプリです。
-Slack・Zoom などは今後コネクタとして追加できる構成になっています。
+Discord などに届いたメッセージ（文章・画像）をローカルLLMで精査し、予定を自動で登録するアプリです。
+メッセージの受け取り方は「Windows の通知を直接読む（Bot 不要）」と「Discord Bot」の2通りで、併用もできます。
 
 ```
-Discord ──▶ DiscordConnector ──▶ ScheduleService ──▶ OllamaClient (ローカルLLM)
-                                     │  予定の検証・重複判定
-                                     ▼
-                                 SQLite ──▶ Notifier ──▶ Discord DM / Web UI
+Windows 通知 ──▶ WindowsNotificationConnector ─┐
+Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ ScheduleService ──▶ OllamaClient (ローカルLLM)
+                                                 │      │  予定の検証・重複判定
+                                                 │      ▼
+                                                 │  SQLite ──▶ Notifier ──▶ Discord DM / Web UI
 ```
 
 ## 仕様（プロジェクトのドキュメントより）
 
 | 項目 | 内容 |
 |---|---|
-| 対象アプリ | 現段階は Discord のみ（Slack / Zoom は `app/connectors/` に追加予定） |
+| 対象アプリ | 現段階は Discord（Windows 通知なら `WINDOWS_NOTIFY_APPS` に Slack / Zoom 等を足すだけで対象にできる） |
 | 精査方法 | ローカルLLM（Ollama）の API を使用。インストール済みモデルから精度の高いものを自動選択 |
 | 通知 | 予定追加時に「10月15日(木)14時から定例ミーティング」の形式で通知 |
 | 重複 | 同日に予定が被った場合は確認通知（Discord DM のボタン / Web UI で「追加する・追加しない」） |
 | UI | Apple のデザイン（Human Interface Guidelines）を参考にしたシンプルな Web UI |
 
+## メッセージの受け取り方
+
+| | Windows 通知（Bot 不要） | Discord Bot |
+|---|---|---|
+| 準備 | 不要（初回に通知へのアクセス許可） | Bot の作成・サーバーへの招待 |
+| 読める範囲 | 通知が出るものすべて（個人 DM も可） | Bot が参加しているサーバーと Bot への DM |
+| 他のアプリ | Slack / Teams / Zoom / LINE なども設定だけで対象 | Discord のみ |
+| 画像の精査 | できない（通知に画像の中身は含まれない） | できる |
+| 長文 | 通知に表示される範囲のみ | 全文 |
+| 取りこぼし | 通知が出ないもの（開いているチャンネル・ミュート中）は読めない | なし |
+| 動作条件 | Windows の PC が起動中 | PC が起動中（OS は問わない） |
+
+おすすめは **Windows 通知を基本にして、DM 通知・確認ボタン・画像の精査が欲しければ Discord Bot を併用** する形です。
+併用する場合は `.env` で `DISCORD_READ_CHANNELS=false` にすると、同じメッセージを二重に精査しません。
+
 ## 必要なもの
 
 - Python 3.10 以上
 - [Ollama](https://ollama.com/)（ローカルLLM の実行環境）
-- Discord Bot（任意。なくても Web UI の「メッセージを解析」で動作確認できます）
+- Windows 10 / 11（Windows 通知を読む場合）
+- Discord Bot（任意）
 
 ## セットアップ（Windows / PowerShell）
 
@@ -58,7 +75,25 @@ ollama pull qwen3-vl:8b     # 画像対応・日本語OK。多くのPCで動く�
 リストにないモデルはパラメータ数の大きい順に選ばれます。モデルを追加したら Web UI 下部の「再検出」を押してください。
 精度を上げたい場合は `.env` で `LLM_THINK=true`（思考モード。遅くなります）。
 
-### 2. Discord Bot を作る
+### 2. Windows 通知を読む設定（Bot 不要）
+
+`.env` の既定値のままで、Windows では自動的に有効になります（`WINDOWS_NOTIFICATIONS=auto`）。
+
+1. Discord（PC 版）の **ユーザー設定 → 通知 → デスクトップ通知を有効にする** を ON
+2. Windows の **設定 → システム → 通知** で Discord の通知が ON になっていることを確認
+3. 初回起動時に「通知へのアクセス」を求められたら許可します。拒否されている場合は
+   **設定 → プライバシーとセキュリティ → 通知** でアクセスを許可してください
+4. Slack なども対象にする場合は `.env` の `WINDOWS_NOTIFY_APPS=Discord,Slack,Teams,Zoom,LINE` のように追加
+
+読み取りは次の順に試し、使えたものを使います（Web UI 下部に表示されます）。
+
+- **通知API**: Windows 公式の通知読み取り API（UserNotificationListener）
+- **通知データベース**: 上が使えない場合、通知センターのデータベース（`%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`）を読み取り専用で参照
+
+> 「応答不可（集中モード）」中でも通知センターに入った通知は読み取れます。
+> Discord で今開いているチャンネルのメッセージや、ミュート中のチャンネルは通知が出ないため対象外です。
+
+### 3. Discord Bot を作る（任意）
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**
 2. **Bot** タブ → **Reset Token** でトークンを取得し、`.env` の `DISCORD_BOT_TOKEN` に設定
@@ -68,9 +103,10 @@ ollama pull qwen3-vl:8b     # 画像対応・日本語OK。多くのPCで動く�
 6. 監視するチャンネルを絞る場合は、チャンネルを右クリック →「チャンネルIDをコピー」→ `DISCORD_WATCH_CHANNEL_IDS`（カンマ区切り）
 
 > Discord の規約上、Bot は「Bot が参加しているサーバーのチャンネル」と「Bot への DM」しか読めません。
-> 個人間の DM などに届いた予定は、そのメッセージを Bot に **転送** すると精査されます。
+> 個人間の DM などに届いた予定は、Windows 通知で読むか、そのメッセージを Bot に **転送** すると精査されます。
+> Bot から DM を受け取るには、Bot と同じサーバーに参加している必要があります（自分専用のサーバーに招待すれば OK）。
 
-### 3. 起動
+### 4. 起動
 
 ```powershell
 python run.py
@@ -80,8 +116,9 @@ python run.py
 
 ## 使い方
 
-- 監視中のチャンネルに「来週水曜15時から定例です」のようなメッセージが投稿されると、自動で予定に登録され、あなたに DM で
-  `10月14日(水)15時から定例` と通知されます。チラシや招待状のスクリーンショットなど画像も対象です。
+- 「来週水曜15時から定例です」のようなメッセージの通知が届く（または Bot が監視中のチャンネルに投稿される）と、
+  自動で予定に登録され、`10月14日(水)15時から定例` と通知されます（Web UI、Bot があれば Discord DM にも）。
+  Bot を使う場合は、チラシや招待状のスクリーンショットなど画像も対象です。
 - 同じ日の予定と時間が重なる場合は登録を保留し、DM に「追加する / 追加しない」ボタン付きの確認通知が届きます。Web UI の「確認待ち」タブからも選べます。
 - Web UI の「＋」から、メッセージの貼り付け解析や手動入力もできます。
 
@@ -89,7 +126,13 @@ python run.py
 
 | キー | 既定値 | 説明 |
 |---|---|---|
-| `DISCORD_BOT_TOKEN` | なし | 未設定なら Discord 連携なし（Web UI のみ） |
+| `WINDOWS_NOTIFICATIONS` | `auto` | Windows 通知の読み取り。`auto`=Windows なら有効 / `true` / `false` |
+| `WINDOWS_NOTIFY_APPS` | `Discord` | 対象アプリ（表示名の部分一致、カンマ区切り） |
+| `WINDOWS_NOTIFY_BACKEND` | `auto` | `auto` / `winrt`（通知API）/ `database`（通知データベース） |
+| `WINDOWS_NOTIFY_POLL_SEC` | `2` | 新着通知を確認する間隔（秒） |
+| `WINDOWS_NOTIFY_BACKFILL_MIN` | `30` | 起動時に、直近何分以内の通知までさかのぼって精査するか |
+| `DISCORD_BOT_TOKEN` | なし | 未設定なら Discord Bot は無効 |
+| `DISCORD_READ_CHANNELS` | `true` | `false` にすると Bot はチャンネルを読まず DM 通知だけ行う |
 | `DISCORD_OWNER_ID` | なし | DM 通知の送り先。Bot への DM はこのユーザーからのみ受け付け |
 | `DISCORD_WATCH_CHANNEL_IDS` | 全チャンネル | 監視するチャンネルID（スレッドは親チャンネルIDでも可） |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | |
@@ -118,6 +161,7 @@ app/
   llm/prompts.py            抽出プロンプト（基準日と参照カレンダーで相対日付を解決）
   connectors/base.py        連絡ツール共通インターフェース
   connectors/discord_bot.py Discord Bot（受信・DM通知・確認ボタン）
+  connectors/windows_notifications.py  Windows 通知の読み取り（通知API / 通知データベース）
   web/api.py                REST API
   static/                   Web UI（HTML/CSS/JS）
 tests/                      pytest
@@ -125,7 +169,8 @@ tests/                      pytest
 
 ## Slack / Zoom を追加するには
 
-`app/connectors/base.py` の `Connector` を継承したクラスを作り、受信メッセージを `IncomingMessage` に変換して
+Windows 通知で読む場合は `.env` の `WINDOWS_NOTIFY_APPS` にアプリ名を足すだけです。
+それぞれの API（Slack Bot など）で全文や画像まで読みたい場合は、`app/connectors/base.py` の `Connector` を継承したクラスを作り、受信メッセージを `IncomingMessage` に変換して
 `service.handle_message()` に渡します。そのツールにも通知を送る場合は `notify_added` / `notify_conflict` を実装して
 `notifier.register()` で登録し、最後に `app/connectors/__init__.py` の `build_connectors()` に追加します。
 
