@@ -34,7 +34,7 @@ async def status(request: Request):
     return {
         "llm": ctx.llm.status(),
         "connectors": [c.status() for c in ctx.connectors],
-        "pending_count": len(ctx.db.list_events(statuses=("pending",))),
+        "pending_count": ctx.service.pending_count(),
         "unread_count": ctx.db.unread_count(),
         "today": ctx.service.today().isoformat(),
     }
@@ -108,9 +108,43 @@ async def reject(request: Request, event_id: int):
         raise HTTPException(404, "予定が見つかりません")
 
 
+@router.post("/changes/{change_id}/apply")
+async def apply_change(request: Request, change_id: int):
+    """確認待ちの変更・取り消しを反映する。"""
+    try:
+        return (await _ctx(request).service.apply_change(change_id)).to_dict()
+    except KeyError:
+        raise HTTPException(404, "変更が見つかりません")
+
+
+@router.post("/changes/{change_id}/reject")
+async def reject_change(request: Request, change_id: int):
+    try:
+        return (await _ctx(request).service.reject_change(change_id)).to_dict()
+    except KeyError:
+        raise HTTPException(404, "変更が見つかりません")
+
+
+@router.post("/changes/{change_id}/undo")
+async def undo_change(request: Request, change_id: int):
+    """反映した変更・取り消しを元に戻す。"""
+    try:
+        return (await _ctx(request).service.undo_change(change_id)).to_dict()
+    except KeyError:
+        raise HTTPException(404, "予定が見つかりません")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 @router.get("/notifications")
 async def notifications(request: Request, limit: int = 100):
-    return [n.to_dict() for n in _ctx(request).db.list_notifications(limit)]
+    ctx = _ctx(request)
+    items = []
+    for n in ctx.db.list_notifications(limit):
+        d = n.to_dict()
+        d["undoable"] = bool(n.change_id and n.kind in ("updated", "cancelled") and ctx.service.is_undoable(n.change_id))
+        items.append(d)
+    return items
 
 
 @router.post("/notifications/read")

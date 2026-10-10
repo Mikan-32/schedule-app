@@ -3,6 +3,7 @@
 - Bot が参加しているサーバーのチャンネル（DISCORD_WATCH_CHANNEL_IDS で絞り込み可）と、
   オーナーから Bot への DM（転送メッセージ含む）を精査する
 - 予定追加・重複確認の通知はオーナーに DM で送る。重複時は「追加する / 追加しない」ボタン付き
+- 予定の変更・取り消しも DM で通知する。自動で反映したものは「元に戻す」、あいまいなものは「変更する / 変更しない」ボタン付き
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import discord
 
 from ..formatting import format_time_range
 from ..llm import LLMUnavailable
-from ..models import Event, ImageInput, IncomingMessage
+from ..models import Event, EventChange, ImageInput, IncomingMessage
 from .base import Connector
 
 if TYPE_CHECKING:
@@ -51,7 +52,7 @@ class ConflictButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sched
             await interaction.response.edit_message(content=f"{original}\n-# この予定は削除されています", view=None)
             return
         if event.status != "pending":
-            state = "追加済み" if event.status == "confirmed" else "追加しないを選択済み"
+            state = {"confirmed": "追加済み", "cancelled": "取り消し済み"}.get(event.status, "追加しないを選択済み")
             await interaction.response.edit_message(content=f"{original}\n-# この予定は既に処理されています（{state}）", view=None)
             return
 
@@ -63,13 +64,69 @@ class ConflictButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sched
             await service.reject(self.event_id)
 
 
+class ChangeButton(discord.ui.DynamicItem[discord.ui.Button], template=r"sched:chg:(?P<action>apply|reject|undo):(?P<id>\d+)"):
+    """予定の変更・取り消しのボタン（変更する / 変更しない / 元に戻す）。"""
+
+    LABELS = {
+        ("update", "apply"): ("変更する", discord.ButtonStyle.primary),
+        ("update", "reject"): ("変更しない", discord.ButtonStyle.secondary),
+        ("cancel", "apply"): ("取り消す", discord.ButtonStyle.danger),
+        ("cancel", "reject"): ("残す", discord.ButtonStyle.secondary),
+    }
+
+    def __init__(self, action: str, change_id: int, kind: str = "update"):
+        label, style = self.LABELS.get((kind, action), ("元に戻す", discord.ButtonStyle.secondary))
+        super().__init__(discord.ui.Button(label=label, style=style, custom_id=f"sched:chg:{action}:{change_id}"))
+        self.action = action
+        self.change_id = change_id
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Item, match: re.Match[str], /):
+        return cls(match["action"], int(match["id"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        connector: DiscordConnector = interaction.client.connector  # type: ignore[attr-defined]
+        service = connector.service
+        original = interaction.message.content if interaction.message else ""
+        change = service.db.get_change(self.change_id)
+        if change is None:
+            await interaction.response.edit_message(content=f"{original}\n-# この変更は見つかりません", view=None)
+            return
+        is_cancel = change.kind == "cancel"
+
+        if self.action == "undo":
+            try:
+                await service.undo_change(self.change_id)
+            except (KeyError, ValueError) as e:
+                reason = str(e) if isinstance(e, ValueError) else "予定が削除されています"
+                await interaction.response.edit_message(content=f"{original}\n-# 元に戻せませんでした（{reason}）", view=None)
+                return
+            await interaction.response.edit_message(content=f"{original}\n→ **元に戻しました**", view=None)
+            return
+
+        if change.status != "pending":
+            state = {"applied": "反映済み", "rejected": "見送り済み", "undone": "元に戻し済み"}.get(change.status, change.status)
+            await interaction.response.edit_message(content=f"{original}\n-# この変更は既に処理されています（{state}）", view=None)
+            return
+        if self.action == "apply":
+            result = await service.apply_change(self.change_id)
+            if result.status == "applied":
+                done = "**取り消しました**" if is_cancel else "**変更しました**"
+            else:
+                done = "対象の予定がなくなっていたため反映しませんでした"
+        else:
+            await service.reject_change(self.change_id)
+            done = "予定を残しました" if is_cancel else "変更しませんでした"
+        await interaction.response.edit_message(content=f"{original}\n→ {done}", view=None)
+
+
 class _Client(discord.Client):
     def __init__(self, connector: "DiscordConnector", **kwargs):
         super().__init__(**kwargs)
         self.connector = connector
 
     async def setup_hook(self) -> None:
-        self.add_dynamic_items(ConflictButton)
+        self.add_dynamic_items(ConflictButton, ChangeButton)
 
     async def on_ready(self) -> None:
         self.connector.state = "connected"
@@ -242,6 +299,26 @@ class DiscordConnector(Connector):
         view = discord.ui.View(timeout=None)
         view.add_item(ConflictButton("confirm", event.id))
         view.add_item(ConflictButton("reject", event.id))
+        first, *rest = message.split("\n")
+        body = f"**確認: {first}**\n" + "\n".join(rest) + f"\n{self._details(event)}"
+        await owner.send(body, view=view)
+
+    async def notify_changed(self, change: EventChange, event: Event, message: str) -> None:
+        owner = await self._owner()
+        if not owner:
+            return
+        view = discord.ui.View(timeout=None)
+        view.add_item(ChangeButton("undo", change.id))
+        head = "予定を取り消しました" if change.kind == "cancel" else "予定を変更しました"
+        await owner.send(f"{head}\n**{message}**\n{self._details(event)}", view=view)
+
+    async def notify_change_pending(self, change: EventChange, event: Event, message: str) -> None:
+        owner = await self._owner()
+        if not owner:
+            return
+        view = discord.ui.View(timeout=None)
+        view.add_item(ChangeButton("apply", change.id, change.kind))
+        view.add_item(ChangeButton("reject", change.id, change.kind))
         first, *rest = message.split("\n")
         body = f"**確認: {first}**\n" + "\n".join(rest) + f"\n{self._details(event)}"
         await owner.send(body, view=view)
