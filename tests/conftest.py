@@ -20,8 +20,8 @@ class FakeExtractor:
         self.events = events or []
         self.calls = []
 
-    async def extract(self, text, sent_at, author="", channel="", images=None):
-        self.calls.append({"text": text, "sent_at": sent_at, "images": images or []})
+    async def extract(self, text, sent_at, author="", channel="", images=None, existing=None):
+        self.calls.append({"text": text, "sent_at": sent_at, "images": images or [], "existing": existing or []})
         return ExtractionResult(events=[ExtractedEvent(**e) for e in self.events])
 
 
@@ -31,12 +31,20 @@ class RecordingSink:
     def __init__(self):
         self.added = []
         self.conflicts = []
+        self.changed = []
+        self.change_pending = []
 
     async def notify_added(self, event, message):
         self.added.append(message)
 
     async def notify_conflict(self, event, conflicts, message):
         self.conflicts.append(message)
+
+    async def notify_changed(self, change, event, message):
+        self.changed.append(message)
+
+    async def notify_change_pending(self, change, event, message):
+        self.change_pending.append(message)
 
 
 @pytest.fixture

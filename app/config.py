@@ -61,6 +61,13 @@ class Settings:
     conflict_mode: str = field(default_factory=lambda: os.getenv("CONFLICT_MODE", "overlap"))
     default_duration_min: int = field(default_factory=lambda: _int("DEFAULT_DURATION_MIN", 60))
 
+    # --- 予定の変更・取り消し ---
+    # auto_if_clear: 対象の予定がはっきりしていて確信度も高ければ自動で反映、あいまいなら確認
+    # confirm: 常に確認してから反映 / auto: 常に自動で反映（変更後の日時に別の予定がある場合だけ確認）
+    change_mode: str = field(default_factory=lambda: os.getenv("CHANGE_MODE", "auto_if_clear").strip().lower())
+    # auto_if_clear のとき、この確信度以上なら自動で反映 (0〜1)
+    change_auto_confidence: float = field(default_factory=lambda: _float("CHANGE_AUTO_CONFIDENCE", 0.8))
+
     # --- Discord ---
     discord_token: str = field(default_factory=lambda: os.getenv("DISCORD_BOT_TOKEN", ""))
     discord_owner_id: int = field(default_factory=lambda: _int("DISCORD_OWNER_ID", 0))

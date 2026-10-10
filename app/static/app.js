@@ -108,10 +108,37 @@ async function renderEvents() {
   return html;
 }
 
+function changeCard({ kind, change, event, after, conflicts }) {
+  const isCancel = kind === "cancel";
+  const rows = (list) => list.map((ev) => eventRow(ev, { deletable: false })).join("");
+  const source = change.source_url
+    ? ` <a href="${esc(change.source_url)}" target="_blank" rel="noopener">元メッセージ</a>`
+    : "";
+  return `
+    <div class="group pending-card">
+      <div class="heading">${isCancel ? "予定の取り消し" : "予定の変更"}</div>
+      ${change.reason ? `<div class="reason">${esc(change.reason)}</div>` : ""}
+      ${isCancel
+        ? `<div class="label-small">${dateLabel(event.date)}</div>${rows([event])}`
+        : `<div class="label-small">変更前 ・ ${dateLabel(event.date)}</div>${rows([event])}
+           <div class="label-small">変更後 ・ ${dateLabel(after.date)}</div>${rows([after])}`}
+      ${conflicts.length ? `<div class="label-small">重なる予定</div>${rows(conflicts)}` : ""}
+      ${change.raw_text ? `<div class="quote">${esc(change.raw_text)}${source}</div>` : ""}
+      <div class="actions">
+        <button class="secondary-button" data-change-reject="${change.id}">${isCancel ? "残す" : "変更しない"}</button>
+        <button class="primary-button" data-change-apply="${change.id}">${isCancel ? "取り消す" : "変更する"}</button>
+      </div>
+    </div>`;
+}
+
 async function renderPending() {
   const items = await api("/api/pending");
-  if (!items.length) return empty("✓", "確認待ちはありません", "同じ日に予定が重なったときに、ここで追加するか選べます");
-  return items.map(({ event, conflicts }) => `
+  if (!items.length) return empty("✓", "確認待ちはありません", "予定が重なったときや、予定の変更・取り消しがあいまいなときに、ここで選べます");
+  return items.map((item) => item.kind === "update" || item.kind === "cancel" ? changeCard(item) : addCard(item)).join("");
+}
+
+function addCard({ event, conflicts }) {
+  return `
     <div class="group pending-card">
       <div class="heading">${dateLabel(event.date)}は既に予定があります</div>
       ${eventRow(event, { deletable: false })}
@@ -121,7 +148,7 @@ async function renderPending() {
         <button class="secondary-button" data-reject="${event.id}">追加しない</button>
         <button class="primary-button" data-confirm="${event.id}">追加する</button>
       </div>
-    </div>`).join("");
+    </div>`;
 }
 
 async function renderNotifications() {
@@ -134,7 +161,7 @@ async function renderNotifications() {
       ${list.map((n) => `
         <div class="row notif-row">
           <span class="dot ${esc(n.kind)} ${n.read ? "read" : ""}"></span>
-          <div class="msg">${esc(n.message)}</div>
+          <div class="msg">${esc(n.message)}${n.undoable ? `<button class="text-button undo" data-undo="${n.change_id}">元に戻す</button>` : ""}</div>
           <span class="when">${timeAgo(n.created_at)}</span>
         </div>`).join("")}
     </div>`;
@@ -216,6 +243,18 @@ document.addEventListener("click", async (e) => {
       await api(`/api/events/${t.dataset.reject}/reject`, { method: "POST" });
       toast("追加しませんでした");
       await Promise.all([render(), refreshStatus()]);
+    } else if (t.dataset.changeApply) {
+      const res = await api(`/api/changes/${t.dataset.changeApply}/apply`, { method: "POST" });
+      toast(res.status !== "applied" ? "対象の予定がなくなっていたため反映しませんでした" : res.kind === "cancel" ? "予定を取り消しました" : "予定を変更しました");
+      await Promise.all([render(), refreshStatus()]);
+    } else if (t.dataset.changeReject) {
+      const res = await api(`/api/changes/${t.dataset.changeReject}/reject`, { method: "POST" });
+      toast(res.kind === "cancel" ? "予定を残しました" : "変更しませんでした");
+      await Promise.all([render(), refreshStatus()]);
+    } else if (t.dataset.undo) {
+      await api(`/api/changes/${t.dataset.undo}/undo`, { method: "POST" });
+      toast("元に戻しました");
+      await Promise.all([render(), refreshStatus()]);
     } else if (t.id === "mark-read") {
       await api("/api/notifications/read", { method: "POST" });
       await Promise.all([render(), refreshStatus()]);
@@ -256,7 +295,7 @@ $("#analyze-form [type=file]").addEventListener("change", (e) => {
   $("#file-names").textContent = names.length ? names.join(", ") : "画像なし";
 });
 
-const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み" };
+const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み", updated: "変更", cancelled: "取り消し", change_pending: "確認待ち" };
 
 $("#analyze-form").addEventListener("submit", async (e) => {
   e.preventDefault();
