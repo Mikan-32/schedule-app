@@ -92,6 +92,28 @@ class Settings:
         default_factory=lambda: Path(os.environ["WINDOWS_NOTIFY_DB_PATH"]) if os.getenv("WINDOWS_NOTIFY_DB_PATH") else None
     )
 
+    # --- 取りこぼし対策 ---
+    # ローカルLLM で精査できなかったメッセージを、何秒ごとに再精査するか
+    queue_retry_sec: float = field(default_factory=lambda: _float("QUEUE_RETRY_SEC", 60.0))
+    # 接続以外のエラー（LLM の応答が壊れている等）で何回失敗したら諦めるか
+    queue_max_attempts: int = field(default_factory=lambda: _int("QUEUE_MAX_ATTEMPTS", 3))
+    # アプリの実行中に PC がスリープしないようにする（Windows のみ）: off / ac（電源接続中だけ）/ always
+    prevent_sleep: str = field(default_factory=lambda: os.getenv("PREVENT_SLEEP", "ac").strip().lower())
+    log_file: Path = field(default_factory=lambda: BASE_DIR / os.getenv("LOG_FILE", "data/app.log"))
+
+    # --- Google カレンダー（アプリ → Google カレンダーへの一方向同期） ---
+    # auto: credentials.json があれば有効 / true / false
+    google_calendar: str = field(default_factory=lambda: os.getenv("GOOGLE_CALENDAR", "auto").strip().lower())
+    google_credentials_path: Path = field(
+        default_factory=lambda: BASE_DIR / os.getenv("GOOGLE_CREDENTIALS", "data/google/credentials.json")
+    )
+    google_token_path: Path = field(default_factory=lambda: BASE_DIR / os.getenv("GOOGLE_TOKEN", "data/google/token.json"))
+    # アプリが作る専用カレンダーの名前
+    google_calendar_name: str = field(default_factory=lambda: os.getenv("GOOGLE_CALENDAR_NAME", "スケジュール（自動登録）"))
+    # 時刻のある予定の何分前にスマホへ通知するか（0 で通知なし）
+    google_reminder_min: int = field(default_factory=lambda: _int("GOOGLE_REMINDER_MIN", 30))
+    google_sync_sec: float = field(default_factory=lambda: _float("GOOGLE_SYNC_SEC", 60.0))
+
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
@@ -99,6 +121,12 @@ class Settings:
     @property
     def discord_enabled(self) -> bool:
         return bool(self.discord_token)
+
+    @property
+    def google_calendar_enabled(self) -> bool:
+        if self.google_calendar == "auto":
+            return self.google_credentials_path.exists()
+        return self.google_calendar in {"1", "true", "yes", "on"}
 
     @property
     def windows_notifications_enabled(self) -> bool:

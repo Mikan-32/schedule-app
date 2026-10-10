@@ -1,8 +1,14 @@
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+# テストが本物の Google カレンダーや PC の電源設定に触れないようにする（.env より優先される）
+os.environ["GOOGLE_CALENDAR"] = "false"
+os.environ["PREVENT_SLEEP"] = "off"
+os.environ["WINDOWS_NOTIFICATIONS"] = "false"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

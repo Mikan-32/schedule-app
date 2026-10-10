@@ -11,6 +11,7 @@ from typing import Optional, Protocol
 
 from .config import Settings
 from .db import Database
+from .llm import LLMUnavailable
 from .models import (
     Event,
     EventChange,
@@ -71,9 +72,10 @@ class EventResult:
 class AnalysisOutcome:
     results: list[EventResult] = field(default_factory=list)
     skipped: str = ""  # スキップ理由（あれば）
+    queued: bool = False  # 精査できず、あとで再精査するために保存した
 
     def to_dict(self) -> dict:
-        return {"skipped": self.skipped, "results": [r.to_dict() for r in self.results]}
+        return {"skipped": self.skipped, "queued": self.queued, "results": [r.to_dict() for r in self.results]}
 
 
 def looks_like_schedule(text: str) -> bool:
@@ -149,6 +151,7 @@ class ScheduleService:
         self.extractor = extractor
         self.notifier = notifier
         self._save_lock = asyncio.Lock()
+        self._queue_lock = asyncio.Lock()
 
     def today(self) -> date:
         return datetime.now(self.settings.tz).date()
@@ -200,18 +203,27 @@ class ScheduleService:
 
         candidates = self.change_candidates()
         try:
-            result = await self.extractor.extract(
-                text=msg.text,
-                sent_at=msg.sent_at.astimezone(self.settings.tz),
-                author=msg.author,
-                channel=msg.channel,
-                images=msg.images,
-                existing=candidates,
-            )
-        except Exception:
-            # LLM が使えなかった場合は、同じメッセージを再送・転送すれば再処理できるようにする
-            self.db.unmark_processed(msg.source, msg.message_id)
-            raise
+            result = await self._extract(msg, candidates)
+        except Exception as e:
+            if force:  # 画面からの解析は、その場でエラーを返す
+                raise
+            # ローカルLLM が止まっている・応答が壊れている → 保存しておき、あとで自動で再精査する
+            self.db.enqueue_message(msg, str(e) or type(e).__name__, count_attempt=not isinstance(e, LLMUnavailable))
+            log.warning("ローカルLLM で精査できなかったため、あとで再精査します: %s", e)
+            return AnalysisOutcome(skipped="ローカルLLM で精査できなかったため、つながったら自動でやり直します", queued=True)
+        return await self._apply_result(result, msg, candidates)
+
+    async def _extract(self, msg: IncomingMessage, candidates: list[Event]) -> ExtractionResult:
+        return await self.extractor.extract(
+            text=msg.text,
+            sent_at=msg.sent_at.astimezone(self.settings.tz),
+            author=msg.author,
+            channel=msg.channel,
+            images=msg.images,
+            existing=candidates,
+        )
+
+    async def _apply_result(self, result: ExtractionResult, msg: IncomingMessage, candidates: list[Event]) -> AnalysisOutcome:
         outcome = AnalysisOutcome()
         notes: list[str] = []
         for raw in result.events:
@@ -229,6 +241,34 @@ class ScheduleService:
         if not outcome.results:
             outcome.skipped = notes[0] if notes else "予定は見つかりませんでした"
         return outcome
+
+    # ---------- 再精査キュー ----------
+    async def process_queue(self) -> int:
+        """精査できなかったメッセージを古い順に精査し直す。ローカルLLM に接続できなければ途中でやめる。"""
+        if self._queue_lock.locked():
+            return 0
+        done = 0
+        async with self._queue_lock:
+            for qid, msg in self.db.list_queue("waiting"):
+                candidates = self.change_candidates()
+                try:
+                    result = await self._extract(msg, candidates)
+                except LLMUnavailable as e:
+                    self.db.queue_failed(qid, str(e), None)  # 回数には数えない
+                    break
+                except Exception as e:
+                    log.warning("再精査に失敗しました: %s", e)
+                    self.db.queue_failed(qid, str(e) or type(e).__name__, self.settings.queue_max_attempts)
+                    continue
+                self.db.dequeue(qid)
+                try:
+                    await self._apply_result(result, msg, candidates)
+                except Exception:
+                    log.exception("再精査したメッセージの登録に失敗しました")
+                done += 1
+        if done:
+            log.info("精査待ちだったメッセージを %d 件精査しました", done)
+        return done
 
     # ---------- 登録・重複判定 ----------
     def _interval(self, ev: Event) -> tuple[datetime, datetime]:

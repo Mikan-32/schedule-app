@@ -113,18 +113,20 @@ async def test_validation_filters(env, future):
     assert ev.title == "全角時刻" and ev.start_time == time(15, 0) and ev.end_time is None
 
 
-async def test_llm_failure_allows_retry(env):
-    import pytest
-
-    service, extractor, *_ = env
+async def test_llm_failure_is_queued_and_retried(env, future):
+    service, extractor, _, db = env
     original = extractor.extract
 
     async def boom(**kwargs):
         raise RuntimeError("down")
 
     extractor.extract = boom
-    with pytest.raises(RuntimeError):
-        await service.handle_message(msg("明日10時から会議", mid="99"))
-    extractor.extract = original
     out = await service.handle_message(msg("明日10時から会議", mid="99"))
-    assert out.skipped != "処理済みのメッセージです"
+    assert out.queued and db.queue_counts()["waiting"] == 1
+    # 同じメッセージがもう一度届いても二重には保存しない
+    assert (await service.handle_message(msg("明日10時から会議", mid="99"))).skipped == "処理済みのメッセージです"
+
+    extractor.extract = original
+    extractor.events = [{"title": "会議", "date": future(1).isoformat(), "start_time": "10:00", "confidence": 0.9}]
+    assert await service.process_queue() == 1
+    assert db.queue_counts()["waiting"] == 0 and [e.title for e in db.list_events()] == ["会議"]

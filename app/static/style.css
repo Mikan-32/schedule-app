@@ -164,6 +164,7 @@ button { font: inherit; color: inherit; }
 .statusbar .light.ng { background: var(--red); }
 .statusbar .light.wait { background: var(--orange); }
 .statusbar button { font-size: 12px; }
+.statusbar a { color: var(--blue); text-decoration: none; }
 
 /* ---------- Sheet ---------- */
 .sheet-backdrop {

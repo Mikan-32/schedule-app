@@ -9,6 +9,8 @@ Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ 
                                                  │      │  予定の検証・重複判定
                                                  │      ▼
                                                  │  SQLite ──▶ Notifier ──▶ Discord DM / Web UI
+                                                 │      │
+                                                 │      └──▶ Google カレンダー（スマホで確認・通知）
 ```
 
 ## 仕様（プロジェクトのドキュメントより）
@@ -114,7 +116,49 @@ ollama pull qwen3-vl:8b     # 画像対応・日本語OK。多くのPCで動く�
 python run.py
 ```
 
-ブラウザで http://127.0.0.1:8000 を開きます。
+ブラウザで http://127.0.0.1:8000 を開きます。ログは `data\app.log` にも保存されます。
+
+### 5. Windows にサインインしたら自動で起動する（おすすめ）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_autostart.ps1
+```
+
+タスク スケジューラに「ScheduleApp」を登録し、すぐに起動します（管理者権限は不要。コンソール画面は出ません）。
+登録できない環境では、スタートアップ フォルダのショートカットで代用します。
+
+- 止める: `Stop-ScheduledTask -TaskName ScheduleApp`
+- 解除する: `powershell -ExecutionPolicy Bypass -File scripts\uninstall_autostart.ps1`
+- 既に起動していれば、`python run.py` を実行しても二重には起動しません
+
+**スリープ対策**: アプリの実行中は、電源につないでいる間 PC がスリープしないようにしています（`PREVENT_SLEEP=ac`）。
+電源設定そのものは変えず、アプリを終了すると元に戻ります。ノート PC のカバーを閉じたときもスリープさせたくない場合は、
+Windows の **コントロール パネル → 電源オプション → カバーを閉じたときの動作** で「電源に接続」を「何もしない」にしてください。
+
+### 6. Google カレンダーと同期する（任意・おすすめ）
+
+確定した予定を、アプリ専用の Google カレンダー「スケジュール（自動登録）」に自動で登録します。
+**PC が消えていても、スマホの Google カレンダーで予定を見られて、30 分前に通知も届きます。**
+アプリが作ったカレンダーだけを操作する権限（`calendar.app.created`）を使うので、ほかのカレンダーの中身は見えません。
+
+1. [Google Cloud コンソール](https://console.cloud.google.com/) でプロジェクトを作成する（名前は自由。例: `schedule-app`）
+2. **API とサービス → ライブラリ** で **Google Calendar API** を検索して **有効にする**
+3. **Google Auth Platform**（旧「OAuth 同意画面」）を開き、最初の設定をする
+   - アプリ名（例: スケジュール管理）とサポートメール（自分のアドレス）を入力
+   - 対象（ユーザーの種類）は **外部**
+4. **対象**（Audience）で **アプリを公開** を押し、公開ステータスを **本番環境** にする
+   - 「テスト」のままだと、Google の仕様で **7 日ごとに連携が切れます**
+5. **クライアント** → **クライアントを作成** → アプリケーションの種類は **デスクトップ アプリ** → 作成
+6. 作成したクライアントの **JSON をダウンロード** し、`data\google\credentials.json` という名前で保存する
+7. アプリを再起動し、Web UI 下部の「Googleカレンダー: 未連携 **連携する**」を押す
+8. Google の画面で自分のアカウントを選んで許可する
+   - 「Google はこのアプリを確認していません」と出たら、**詳細 → （アプリ名）に移動** で進みます（自分で作ったアプリなので問題ありません）
+9. 「Google カレンダーと連携しました」と表示されれば完了です。スマホの Google カレンダー アプリで
+   「スケジュール（自動登録）」カレンダーが表示されているか確認してください（表示されない場合は、アプリの設定でそのカレンダーの同期を ON）
+
+> 同期はアプリ → Google カレンダーの一方向です。Google カレンダー側で編集しても、アプリには反映されません
+> （アプリ側でその予定が変わったときに上書きされます）。「確認待ち」の予定は、確定してから登録されます。
+> 連携をやめるときは、Web UI 下部の「解除」を押します（登録済みの予定は Google カレンダーに残ります）。
 
 ## 使い方
 
@@ -135,6 +179,8 @@ python run.py
     補ったときは `同じ予定の連絡をまとめました: …に場所「会議室A」を追加` と「元に戻す」付きで通知し、新しい情報がなければ通知しません。
   - 同じ予定か判断できず「確認待ち」に入ったものは、「同じ予定（まとめる）」ボタンで既存の予定にまとめられます。
     開始時刻が同じ場合は「同じ予定があるかもしれません」と表示します。
+- ローカルLLM（Ollama）が止まっているときに届いたメッセージは捨てずに保存し、つながったら自動で精査します（Web UI 下部に「精査待ち」の件数）。
+  LLM の応答が壊れているなどで 3 回失敗したものは「精査できなかったメッセージ」になり、「再試行」でやり直せます。
 - Web UI の「＋」から、メッセージの貼り付け解析や手動入力もできます。
 
 ## 設定（.env）
@@ -159,6 +205,16 @@ python run.py
 | `DEFAULT_DURATION_MIN` | `60` | 終了時刻が不明な予定の長さ（重複判定用） |
 | `CHANGE_MODE` | `auto_if_clear` | 予定の変更・取り消しの反映方法。`auto_if_clear`=はっきりしていれば自動・あいまいなら確認 / `confirm`=常に確認 / `auto`=常に自動（変更後の日時に別の予定がある場合だけ確認） |
 | `CHANGE_AUTO_CONFIDENCE` | `0.8` | `auto_if_clear` のとき、この確信度以上なら自動で反映 |
+| `QUEUE_RETRY_SEC` | `60` | 精査できなかったメッセージを何秒ごとに再精査するか |
+| `QUEUE_MAX_ATTEMPTS` | `3` | LLM の応答エラーなどで何回失敗したらあきらめるか（接続できないだけなら数えない） |
+| `PREVENT_SLEEP` | `ac` | アプリ実行中のスリープ防止（Windows）。`ac`=電源接続中だけ / `always` / `off` |
+| `LOG_FILE` | `data/app.log` | ログファイル |
+| `GOOGLE_CALENDAR` | `auto` | Google カレンダー同期。`auto`=credentials.json があれば有効 / `true` / `false` |
+| `GOOGLE_CREDENTIALS` | `data/google/credentials.json` | Google Cloud でダウンロードした OAuth クライアント |
+| `GOOGLE_TOKEN` | `data/google/token.json` | 連携後に保存されるトークン（他人に渡さないこと） |
+| `GOOGLE_CALENDAR_NAME` | `スケジュール（自動登録）` | アプリが作る専用カレンダーの名前 |
+| `GOOGLE_REMINDER_MIN` | `30` | 時刻のある予定の何分前にスマホへ通知するか（`0` で通知なし） |
+| `GOOGLE_SYNC_SEC` | `60` | 同期の間隔（予定が変わったときはすぐ同期） |
 | `TIMEZONE` | `Asia/Tokyo` | |
 
 終日の予定は、同じ日の他の予定すべてと「被っている」とみなします。
@@ -179,8 +235,12 @@ app/
   connectors/base.py        連絡ツール共通インターフェース
   connectors/discord_bot.py Discord Bot（受信・DM通知・確認ボタン）
   connectors/windows_notifications.py  Windows 通知の読み取り（通知API / 通知データベース）
+  gcal.py                   Google カレンダー同期（OAuth・専用カレンダー・一方向同期）
+  power.py                  実行中のスリープ防止（Windows）
+  background.py             定期実行タスク（再精査・同期）
   web/api.py                REST API
   static/                   Web UI（HTML/CSS/JS）
+scripts/install_autostart.ps1    Windows サインイン時の自動起動を登録（uninstall_autostart.ps1 で解除）
 tests/                      pytest
 ```
 
