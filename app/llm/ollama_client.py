@@ -289,17 +289,22 @@ class OllamaClient:
         except Exception:
             pass
 
+        # 画像付きは時間がかかる（CPU だけの PC だと 1 枚で 3〜4 分）ので、待ち時間を分ける
+        wait = self.settings.llm_image_timeout if images else self.settings.llm_timeout
         last_error: Exception | None = None
         async with self._busy:
             for attempt in range(2):
                 try:
-                    r = await self._client.post("/api/chat", json=payload)
+                    r = await self._client.post("/api/chat", json=payload, timeout=httpx.Timeout(wait, connect=5.0))
                     r.raise_for_status()
                     content = r.json()["message"]["content"]
                     return ExtractionResult.model_validate(_parse_json(content))
                 except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                     self.selection = ModelSelection(error=str(e))
                     raise LLMUnavailable(f"Ollama に接続できません: {e}") from e
+                except httpx.TimeoutException as e:
+                    # 同じ内容でやり直しても同じだけかかるので、ここではやり直さない（再精査キューに任せる）
+                    raise RuntimeError(f"ローカルLLM の応答が {wait:.0f} 秒以内に返りませんでした") from e
                 except Exception as e:
                     last_error = e
                     log.warning("LLM応答の解析に失敗 (試行%d): %s", attempt + 1, e)

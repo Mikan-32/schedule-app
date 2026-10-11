@@ -6,7 +6,7 @@ import pytest
 
 from app.config import Settings
 from app.llm.ollama_client import LLMUnavailable, OllamaClient, rank_models
-from app.llm.prompts import SYSTEM_PROMPT, build_calendar
+from app.llm.prompts import SYSTEM_PROMPT, build_calendar, build_user_prompt
 from app.models import ImageInput
 
 TAGS = [
@@ -132,3 +132,40 @@ def test_system_prompt_extracts_invitations():
     assert "明日遊ぼう" in SYSTEM_PROMPT
     assert "仮定や検討中の話は抽出しない" not in SYSTEM_PROMPT
     assert "15日と16日どっちがいい？" in SYSTEM_PROMPT  # 候補日が決まっていない話は引き続き抽出しない
+
+
+async def test_image_requests_wait_longer_and_timeouts_are_not_retried():
+    # 画像付きは CPU だけの PC だと数分かかるので、LLM_IMAGE_TIMEOUT まで待つ。時間切れは同じ要求をやり直さない
+    waits, chats = [], []
+
+    def handler(request: httpx.Request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "qwen3-vl:8b-instruct", "details": {}}]})
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"capabilities": ["completion", "vision"]})
+        waits.append(request.extensions["timeout"]["read"])
+        chats.append(1)
+        if len(chats) == 2:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(200, json={"message": {"role": "assistant", "content": '{"events": []}'}})
+
+    client = OllamaClient(Settings(llm_timeout=300, llm_image_timeout=900), transport=httpx.MockTransport(handler))
+    await client.extract("明日14時から会議", datetime(2026, 10, 10))
+    with pytest.raises(RuntimeError, match="900 秒以内"):
+        await client.extract("", datetime(2026, 10, 10), images=[ImageInput(b"\x89PNG")])
+    assert waits == [300, 900] and len(chats) == 2
+    await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "text, images, expected",
+    [
+        ("", 1, "添付画像に書かれている内容を本文として読み取る"),
+        ("", 0, "【メッセージ本文】\n（本文なし）"),
+        ("BBQのお知らせです", 1, "【メッセージ本文】\nBBQのお知らせです"),
+    ],
+)
+def test_prompt_treats_image_as_message_body(text, images, expected):
+    prompt = build_user_prompt(text, datetime(2026, 10, 11, 14, 0), image_count=images)
+    assert expected in prompt
+    assert ("【添付画像】" in prompt) == bool(images)

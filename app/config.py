@@ -63,6 +63,8 @@ class Settings:
     ollama_vision_model: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "auto"))
     llm_think: bool = field(default_factory=lambda: _bool("LLM_THINK", False))
     llm_timeout: float = field(default_factory=lambda: _float("LLM_TIMEOUT", 300.0))
+    # 画像付きの精査の待ち時間（秒）。CPU だけの PC だと画像 1 枚で 3〜4 分かかるため長めにする
+    llm_image_timeout: float = field(default_factory=lambda: _float("LLM_IMAGE_TIMEOUT", 900.0))
     min_confidence: float = field(default_factory=lambda: _float("MIN_CONFIDENCE", 0.5))
     # 日付・時刻らしき表現がないテキストはLLMに送らない（負荷軽減）
     prefilter: bool = field(default_factory=lambda: _bool("PREFILTER", True))

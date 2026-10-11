@@ -23,7 +23,7 @@ SYSTEM_PROMPT = """あなたはチャットメッセージ（と添付画像）�
 
 # 文脈（直前のやり取り・返信先）
 - 【直前のやり取り】【返信先のメッセージ】は、【メッセージ本文】を理解するための参考情報。
-- 抽出するのは【メッセージ本文】によって決まった・変わった・取り消された予定だけ。
+- 抽出するのは【メッセージ本文】（添付画像があれば画像の内容も本文に含める）によって決まった・変わった・取り消された予定だけ。
   例: 直前に「来週の定例、15日と16日どっちがいい？」→ 本文「15日で決定です」なら、15日の定例を抽出する。
   例: 直前に「明日14時から打ち合わせでどうですか」→ 本文「了解です、それでお願いします」なら、明日14時の打ち合わせを抽出する。
 - 本文が予定と関係ない、または直前のやり取りの中だけで完結している予定（本文で何も決まっていない）は抽出しない。
@@ -65,7 +65,9 @@ SYSTEM_PROMPT = """あなたはチャットメッセージ（と添付画像）�
   update / cancel の場合は、その変更・取り消しが確定していて、対象の予定も合っている確信度。
 
 # 画像
-- 画像（スクリーンショット、チラシ、招待状、時間割など）が添付されている場合は、画像内の文字も読み取って判断する。
+- 画像（スクリーンショット、チラシ、お知らせ、招待状、時間割など）が添付されている場合は、画像内の文字を読み取り、
+  メッセージ本文の一部として扱う。本文がなく画像だけのときは、画像に書かれている予定を抽出する。
+- 画像の中の日時・場所・持ち物なども、本文に書かれている場合と同じように各項目に入れる。
 
 # 出力JSONスキーマ
 """ + json.dumps(EXTRACTION_SCHEMA, ensure_ascii=False)
@@ -134,13 +136,19 @@ def build_user_prompt(
         dm = "（利用者との1対1のメッセージ）" if channel.endswith("DM") else ""
         parts.append(f"【チャンネル】{channel}{dm}")
     if image_count:
-        parts.append(f"【添付画像】{image_count}枚")
+        parts.append(f"【添付画像】{image_count}枚（画像内の文字もメッセージの一部）")
     parts.append("【参照カレンダー】\n" + build_calendar(sent_at))
     parts.append("【登録済みの予定】\n" + format_existing(existing))
     if context:
         parts.append("【直前のやり取り】（同じ場所の直前のメッセージ。古い順。参考情報）\n" + format_context(context, sent_at.tzinfo))
     if reply_to.strip():
         parts.append("【返信先のメッセージ】\n" + " ".join(reply_to.split())[:500])
-    parts.append("【メッセージ本文】\n" + (text.strip() or "（本文なし。画像のみ）"))
+    if text.strip():
+        body = text.strip()
+    elif image_count:
+        body = "（本文なし。添付画像に書かれている内容を本文として読み取る）"
+    else:
+        body = "（本文なし）"
+    parts.append("【メッセージ本文】\n" + body)
     parts.append("上記から予定を抽出し、JSONで出力してください。")
     return "\n\n".join(parts)
