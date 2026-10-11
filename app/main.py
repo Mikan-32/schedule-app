@@ -17,7 +17,7 @@ from .config import Settings, settings as default_settings
 from .connectors import Connector, build_connectors
 from .db import Database
 from .gcal import GoogleCalendarSync
-from .llm import OllamaClient
+from .llm import EmbeddedOllama, OllamaClient
 from .notifier import Notifier
 from .power import SleepGuard
 from .service import ScheduleService
@@ -39,6 +39,7 @@ class AppContext:
     gcal: Optional[GoogleCalendarSync] = None
     gcal_task: Optional[PeriodicTask] = None
     sleep_guard: Optional[SleepGuard] = None
+    runtime: Optional[EmbeddedOllama] = None  # 同梱の Ollama（LLM_RUNTIME=external なら None）
 
 
 def create_app(
@@ -59,12 +60,23 @@ def create_app(
         ctx.connectors = build_connectors(settings, service, notifier) if start_connectors else []
         app.state.ctx = ctx
 
-        sel = await client.refresh_selection()
-        if sel.available:
-            log.info("ローカルLLM: テキスト=%s / 画像=%s", sel.text_model, sel.vision_model or "なし")
-        else:
-            log.warning(sel.error)
+        async def select_model() -> None:
+            sel = await client.refresh_selection()
+            if sel.available:
+                log.info("ローカルLLM: テキスト=%s / 画像=%s", sel.text_model, sel.vision_model or "なし")
+                if ctx.queue_task:
+                    ctx.queue_task.kick()  # 起動を待っていたメッセージをすぐ精査する
+            else:
+                log.warning(sel.error)
+
         ctx.queue_task = PeriodicTask("queue-retry", service.process_queue, settings.queue_retry_sec)
+        if llm is None and settings.llm_runtime_mode == "embedded":
+            # 同梱の Ollama は準備（初回はダウンロード）に時間がかかるので、裏で進めて、できたらモデルを選ぶ
+            ctx.runtime = EmbeddedOllama(settings)
+            ctx.runtime.on_ready.append(select_model)
+            ctx.runtime.start()
+        else:
+            await select_model()
         ctx.queue_task.start()
         if settings.google_calendar_enabled:
             ctx.gcal = GoogleCalendarSync(settings, db, transport=gcal_transport)
@@ -86,6 +98,8 @@ def create_app(
                 if task:
                     await task.stop()
             await ctx.sleep_guard.stop()
+            if ctx.runtime:
+                await ctx.runtime.stop()
             if ctx.gcal:
                 await ctx.gcal.aclose()
             await client.aclose()

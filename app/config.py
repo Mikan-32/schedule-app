@@ -45,7 +45,19 @@ class Settings:
     port: int = field(default_factory=lambda: _int("PORT", 8000))
 
     # --- ローカルLLM (Ollama) ---
+    # auto: Windows ではアプリに同梱の Ollama を使う（別途インストール不要）、それ以外は external
+    # embedded: 同梱の Ollama / external: 自分でインストールした Ollama（OLLAMA_BASE_URL）
+    llm_runtime: str = field(default_factory=lambda: os.getenv("LLM_RUNTIME", "auto").strip().lower())
     ollama_base_url: str = field(default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/"))
+    # 同梱の Ollama（実行ファイルとモデルの置き場・バージョン・ポート・最初に用意するモデル・GPU）
+    embedded_ollama_dir: Path = field(default_factory=lambda: BASE_DIR / os.getenv("EMBEDDED_OLLAMA_DIR", "data/ollama"))
+    embedded_ollama_version: str = field(default_factory=lambda: os.getenv("EMBEDDED_OLLAMA_VERSION", "v0.40.2").strip())
+    embedded_ollama_port: int = field(default_factory=lambda: _int("EMBEDDED_OLLAMA_PORT", 11435))
+    embedded_model: str = field(default_factory=lambda: os.getenv("EMBEDDED_MODEL", "qwen3-vl:8b-instruct").strip())
+    # auto: NVIDIA のドライバーがあれば GPU 用のライブラリも取り出す / cpu / nvidia
+    embedded_gpu: str = field(default_factory=lambda: os.getenv("EMBEDDED_GPU", "auto").strip().lower())
+    # 別途インストールした Ollama に同じモデルがあれば取り込む（ダウンロードしなくて済む）
+    embedded_import_models: bool = field(default_factory=lambda: _bool("EMBEDDED_IMPORT_MODELS", True))
     # "auto" なら、インストール済みモデルから精度の高い順に自動選択
     ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "auto"))
     ollama_vision_model: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "auto"))
@@ -128,6 +140,20 @@ class Settings:
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
+
+    @property
+    def llm_runtime_mode(self) -> str:
+        """embedded（同梱の Ollama）または external（自分でインストールした Ollama）。"""
+        if self.llm_runtime in ("embedded", "external"):
+            return self.llm_runtime
+        return "embedded" if sys.platform == "win32" else "external"
+
+    @property
+    def ollama_url(self) -> str:
+        """実際に接続する Ollama の URL。"""
+        if self.llm_runtime_mode == "embedded":
+            return f"http://127.0.0.1:{self.embedded_ollama_port}"
+        return self.ollama_base_url
 
     @property
     def discord_enabled(self) -> bool:

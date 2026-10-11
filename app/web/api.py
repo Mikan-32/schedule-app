@@ -35,7 +35,7 @@ class EventIn(BaseModel):
 async def status(request: Request):
     ctx = _ctx(request)
     return {
-        "llm": ctx.llm.status(),
+        "llm": _llm_status(ctx),
         "connectors": [c.status() for c in ctx.connectors],
         "pending_count": ctx.service.pending_count(),
         "unread_count": ctx.db.unread_count(),
@@ -46,13 +46,21 @@ async def status(request: Request):
     }
 
 
+def _llm_status(ctx) -> dict:
+    runtime = ctx.runtime.status() if ctx.runtime else {"mode": "external"}
+    return {**ctx.llm.status(), "runtime": runtime}
+
+
 @router.post("/llm/refresh")
 async def refresh_llm(request: Request):
     ctx = _ctx(request)
+    if ctx.runtime and ctx.runtime.state in ("error", "stopped"):
+        ctx.runtime.start()  # 同梱の Ollama の準備に失敗していたら、やり直す（できたらモデルも選び直す）
+        return _llm_status(ctx)
     sel = await ctx.llm.refresh_selection()
     if sel.available and ctx.queue_task:
         ctx.queue_task.kick()  # つながったら、精査できなかったメッセージをすぐ精査する
-    return ctx.llm.status()
+    return _llm_status(ctx)
 
 
 @router.post("/queue/retry")

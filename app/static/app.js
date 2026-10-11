@@ -193,11 +193,23 @@ function renderStatus() {
   setBadge($("#unread-badge"), s.unread_count);
 
   const llm = s.llm;
-  const llmText = llm.available
-    ? `ローカルLLM: ${esc(llm.text_model)}${llm.vision_model && llm.vision_model !== llm.text_model ? `（画像: ${esc(llm.vision_model)}）` : llm.vision_model ? "（画像対応）" : "（画像非対応）"}`
-    : `ローカルLLM: ${esc(llm.error || "未接続")}`;
-  const items = [`<span class="item"><span class="light ${llm.available ? "ok" : "ng"}"></span>${llmText}
-      <button class="text-button" id="refresh-llm">再検出</button></span>`];
+  const rt = llm.runtime || {};
+  const llmLabel = rt.mode === "embedded" ? "ローカルLLM（アプリ内）" : "ローカルLLM";
+  let llmLight = llm.available ? "ok" : "ng";
+  let llmText = llm.available
+    ? `${llmLabel}: ${esc(llm.text_model)}${llm.vision_model && llm.vision_model !== llm.text_model ? `（画像: ${esc(llm.vision_model)}）` : llm.vision_model ? "（画像対応）" : "（画像非対応）"}`
+    : `${llmLabel}: ${esc(llm.error || "未接続")}`;
+  let llmButton = "再検出";
+  if (rt.mode === "embedded" && rt.state !== "running") {
+    // 同梱の Ollama の準備中（初回はダウンロード）・エラー
+    const p = rt.progress;
+    const pct = p && p.total ? ` ${fmtBytes(p.done)} / ${fmtBytes(p.total)}（${Math.floor((p.done * 100) / p.total)}%）` : "";
+    llmText = `${llmLabel}: ${esc(rt.message || rt.state)}${pct}`;
+    llmLight = rt.state === "error" || rt.state === "stopped" ? "ng" : "wait";
+    llmButton = rt.state === "error" || rt.state === "stopped" ? "再試行" : "";
+  }
+  const items = [`<span class="item"><span class="light ${llmLight}"></span>${llmText}
+      ${llmButton ? `<button class="text-button" id="refresh-llm">${llmButton}</button>` : ""}</span>`];
 
   const STATE = { connected: "接続中", listening: "監視中", connecting: "接続しています…", starting: "開始しています…", reconnecting: "再接続中…", error: "エラー", stopped: "停止" };
   const lightOf = (state) => (state === "connected" || state === "listening" ? "ok" : state === "error" ? "ng" : "wait");
@@ -242,6 +254,11 @@ function renderStatus() {
     items.push(`<span class="item"><span class="light ${p.active ? "ok" : ""}"></span>スリープ防止: ${text}</span>`);
   }
   $("#statusbar").innerHTML = items.join("");
+}
+
+function fmtBytes(n) {
+  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}GB`;
+  return `${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)}MB`;
 }
 
 async function refreshStatus() {
@@ -308,9 +325,9 @@ document.addEventListener("click", async (e) => {
       await refreshStatus();
     } else if (t.id === "refresh-llm") {
       t.disabled = true;
-      await api("/api/llm/refresh", { method: "POST" });
+      const res = await api("/api/llm/refresh", { method: "POST" });
       await refreshStatus();
-      toast("ローカルLLMを再検出しました");
+      toast(res.runtime?.mode === "embedded" && res.runtime.state !== "running" ? "ローカルLLMの準備をやり直します" : "ローカルLLMを再検出しました");
     }
   } catch (err) {
     toast(err.message);

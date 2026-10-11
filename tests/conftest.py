@@ -11,6 +11,7 @@ os.environ["PREVENT_SLEEP"] = "off"
 os.environ["WINDOWS_NOTIFICATIONS"] = "false"
 os.environ["MY_NAMES"] = ""
 os.environ["OTHERS_MODE"] = "skip"
+os.environ["LLM_RUNTIME"] = "external"  # テストで同梱の Ollama をダウンロード・起動しない
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

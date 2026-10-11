@@ -1,11 +1,12 @@
 # スケジュール管理アプリ
 
 Discord などに届いたメッセージ（文章・画像）をローカルLLMで精査し、予定を自動で登録するアプリです。
+ローカルLLM の実行環境（Ollama）はアプリに同梱されていて、初回起動時に自動で用意されます（別途インストール不要）。
 メッセージの受け取り方は「Windows の通知を直接読む（Bot 不要）」と「Discord Bot」の2通りで、併用もできます。
 
 ```
 Windows 通知 ──▶ WindowsNotificationConnector ─┐
-Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ ScheduleService ──▶ OllamaClient (ローカルLLM)
+Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ ScheduleService ──▶ OllamaClient ──▶ 同梱の Ollama（ローカルLLM）
                                                  │      │  予定の検証・重複判定
                                                  │      ▼
                                                  │  SQLite ──▶ Notifier ──▶ Discord DM / Web UI
@@ -18,7 +19,7 @@ Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ 
 | 項目 | 内容 |
 |---|---|
 | 対象アプリ | 現段階は Discord（Windows 通知なら `WINDOWS_NOTIFY_APPS` に Slack / Zoom 等を足すだけで対象にできる） |
-| 精査方法 | ローカルLLM（Ollama）の API を使用。インストール済みモデルから精度の高いものを自動選択 |
+| 精査方法 | ローカルLLM（アプリに同梱の Ollama）の API を使用。インストール済みモデルから精度の高いものを自動選択 |
 | 通知 | 予定追加時に「10月15日(木)14時から定例ミーティング」の形式で通知 |
 | 重複 | 同日に予定が被った場合は確認通知（Discord DM のボタン / Web UI で「追加する・追加しない」） |
 | 変更・取り消し | 「延期」「中止」などの連絡で登録済みの予定を更新。はっきりしていれば自動で反映（「元に戻す」可）、あいまいなら確認 |
@@ -44,7 +45,7 @@ Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ 
 ## 必要なもの
 
 - Python 3.10 以上
-- [Ollama](https://ollama.com/)（ローカルLLM の実行環境）
+- 空き容量 約 7GB（ローカルLLM の実行環境 約 110MB ＋ モデル 約 6GB。アプリが `data\ollama` に自動で用意します）
 - Windows 10 / 11（Windows 通知を読む場合）
 - Discord Bot（任意）
 
@@ -58,11 +59,27 @@ pip install -r requirements.txt
 copy .env.example .env      # 中身を編集
 ```
 
-### 1. ローカルLLM を用意する
+### 1. ローカルLLM（自動で用意されます）
 
-```powershell
-ollama pull qwen3-vl:8b-instruct     # 画像対応・日本語OK。多くのPCで動く標準的な選択
-```
+ローカルLLM の実行環境（[Ollama](https://ollama.com/)）はアプリに同梱されています。**インストールは不要** で、
+初回起動時にアプリが次の順で `data\ollama` に用意します（進み具合は Web UI 下部に表示されます）。
+
+1. Ollama の公式リリース（GitHub）から、必要なファイルだけを取り出す（GPU のない PC で約 40MB。
+   公式の zip は約 1.5GB ありますが、大半は NVIDIA GPU 用のライブラリなので、GPU がなければ読みません）
+2. 別途インストールした Ollama に同じモデルがあれば取り込む（同じドライブならハードリンクなので容量は増えません）
+3. なければ `qwen3-vl:8b-instruct`（画像対応・日本語OK、約 6GB）をダウンロードする
+
+2 回目以降はすぐに起動します。同梱の Ollama はアプリと一緒に起動・終了し、ポート `11435` を使うので、
+別途インストールした Ollama（`11434`）とはぶつかりません。用意ができたら、別途インストールした Ollama はアンインストールしてかまいません。
+
+- 準備に失敗したとき（ネットにつながっていなかった等）は、Web UI 下部の「再試行」でやり直せます
+- 自分でインストールした Ollama（GPU のある別の PC など）を使う場合は、`.env` で `LLM_RUNTIME=external` と `OLLAMA_BASE_URL` を設定します
+- 同梱の Ollama にモデルを追加する場合（アプリの起動中に、PowerShell で）:
+
+  ```powershell
+  $env:OLLAMA_HOST = "127.0.0.1:11435"
+  data\ollama\bin\v0.40.2-cpu\ollama.exe pull gemma3:12b    # NVIDIA GPU がある PC では v0.40.2-nvidia
+  ```
 
 `OLLAMA_MODEL=auto`（既定）の場合、インストール済みのモデルから次の優先順で自動選択します
 （`app/llm/ollama_client.py` の `MODEL_PREFERENCE`）。画像付きメッセージは画像対応モデルで処理します。
@@ -195,7 +212,7 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 - `.env` の `MY_NAMES` にあなたの名前（表示名・ニックネームなど）を書いておくと、自分宛てかどうかを判断します。
   「田中さんは15日に面談です」のように、はっきり他の人だけの予定は登録せず、通知に「他の人の予定として見送りました」と残します。
   自分の予定だった場合は、通知の「自分の予定として追加する」で登録できます。全員向けや、どちらか分からないものは今までどおり登録します。
-- ローカルLLM（Ollama）が止まっているときに届いたメッセージは捨てずに保存し、つながったら自動で精査します（Web UI 下部に「精査待ち」の件数）。
+- ローカルLLM が止まっているとき（初回の準備中を含む）に届いたメッセージは捨てずに保存し、つながったら自動で精査します（Web UI 下部に「精査待ち」の件数）。
   LLM の応答が壊れているなどで 3 回失敗したものは「精査できなかったメッセージ」になり、「再試行」でやり直せます。
 - Web UI の「＋」から、メッセージの貼り付け解析や手動入力もできます。
 
@@ -212,7 +229,14 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 | `DISCORD_READ_CHANNELS` | `true` | `false` にすると Bot はチャンネルを読まず DM 通知だけ行う |
 | `DISCORD_OWNER_ID` | なし | DM 通知の送り先。Bot への DM はこのユーザーからのみ受け付け |
 | `DISCORD_WATCH_CHANNEL_IDS` | 全チャンネル | 監視するチャンネルID（スレッドは親チャンネルIDでも可） |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | |
+| `LLM_RUNTIME` | `auto` | `auto`=Windows ではアプリに同梱の Ollama を使う / `embedded` / `external`=自分でインストールした Ollama を使う |
+| `EMBEDDED_OLLAMA_VERSION` | `v0.40.2` | 同梱の Ollama のバージョン（変えると次回起動時に入れ替え） |
+| `EMBEDDED_OLLAMA_PORT` | `11435` | 同梱の Ollama のポート |
+| `EMBEDDED_MODEL` | `qwen3-vl:8b-instruct` | 同梱の Ollama にモデルがないとき、最初に用意するモデル |
+| `EMBEDDED_GPU` | `auto` | `auto`=NVIDIA のドライバーがあれば GPU 用のライブラリも用意 / `cpu` / `nvidia` |
+| `EMBEDDED_IMPORT_MODELS` | `true` | 別途インストールした Ollama に同じモデルがあれば取り込む |
+| `EMBEDDED_OLLAMA_DIR` | `data/ollama` | 同梱の Ollama の実行ファイル・モデル・ログ（`server.log`）の置き場 |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | `LLM_RUNTIME=external` のときの接続先 |
 | `OLLAMA_MODEL` / `OLLAMA_VISION_MODEL` | `auto` | モデルを固定したい場合に指定 |
 | `LLM_THINK` | `false` | 思考モード（対応モデルのみ） |
 | `MIN_CONFIDENCE` | `0.5` | これ未満の確信度の予定は登録しない |
@@ -251,6 +275,7 @@ app/
   formatting.py             「○月○日(○)○時から○○」形式の文面
   db.py / models.py         SQLite / データモデル
   llm/ollama_client.py      Ollama API・モデル自動選択・画像の前処理
+  llm/runtime.py            同梱の Ollama（必要なファイルだけのダウンロード・モデルの用意・起動と監視）
   llm/prompts.py            抽出プロンプト（基準日と参照カレンダーで相対日付を解決）
   connectors/base.py        連絡ツール共通インターフェース
   connectors/discord_bot.py Discord Bot（受信・DM通知・確認ボタン）

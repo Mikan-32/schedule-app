@@ -156,7 +156,7 @@ class OllamaClient:
     def __init__(self, settings: Settings, transport: Optional[httpx.AsyncBaseTransport] = None):
         self.settings = settings
         self._client = httpx.AsyncClient(
-            base_url=settings.ollama_base_url,
+            base_url=settings.ollama_url,
             timeout=httpx.Timeout(settings.llm_timeout, connect=5.0),
             transport=transport,
         )
@@ -190,7 +190,7 @@ class OllamaClient:
                 r.raise_for_status()
                 tags = r.json().get("models", [])
             except Exception as e:
-                sel.error = f"Ollama に接続できません ({self.settings.ollama_base_url}): {e}"
+                sel.error = f"Ollama に接続できません ({self.settings.ollama_url}): {e}"
                 self.selection = sel
                 return sel
 
@@ -227,7 +227,10 @@ class OllamaClient:
                     sel.vision_model = name
 
             if not sel.text_model:
-                sel.error = "利用できるモデルがありません。`ollama pull qwen3-vl:8b-instruct` などでモデルを取得してください。"
+                if self.settings.llm_runtime_mode == "embedded":
+                    sel.error = "利用できるモデルがありません（同梱の Ollama が自動でダウンロードします）"
+                else:
+                    sel.error = "利用できるモデルがありません。`ollama pull qwen3-vl:8b-instruct` などでモデルを取得してください。"
             log.info("LLM選択: text=%s vision=%s", sel.text_model, sel.vision_model)
             self.selection = sel
             return sel
@@ -305,7 +308,7 @@ class OllamaClient:
     def status(self) -> dict:
         s = self.selection
         return {
-            "base_url": self.settings.ollama_base_url,
+            "base_url": self.settings.ollama_url,
             "available": s.available,
             "text_model": s.text_model,
             "vision_model": s.vision_model,
