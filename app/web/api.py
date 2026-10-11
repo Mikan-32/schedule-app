@@ -18,6 +18,9 @@ from ..service import _parse_time
 
 router = APIRouter(prefix="/api")
 
+MAX_PASTE_IMAGES = 4
+MAX_PASTE_IMAGE_BYTES = 20 * 1024 * 1024
+
 
 def _ctx(request: Request):
     return request.app.state.ctx
@@ -221,7 +224,10 @@ async def mark_read(request: Request):
 
 @router.post("/analyze")
 async def analyze(request: Request, text: str = Form(""), images: list[UploadFile] = File(default=[])):
-    """貼り付けたメッセージ・画像を精査して予定登録する（Discord を使わない動作確認にも使える）。"""
+    """貼り付けたメッセージ・画像を精査し、終わるまで待って結果を返す（curl などでの動作確認用）。
+
+    Web UI は、待たずに裏で精査する POST /api/analyze/jobs を使う。
+    """
     ctx = _ctx(request)
     imgs = []
     for f in images[:4]:
@@ -246,6 +252,44 @@ async def analyze(request: Request, text: str = Form(""), images: list[UploadFil
     except Exception as e:
         raise HTTPException(500, f"精査に失敗しました: {e}")
     return outcome.to_dict()
+
+
+@router.post("/analyze/jobs", status_code=202)
+async def submit_analyze_job(request: Request, text: str = Form(""), images: list[UploadFile] = File(default=[])):
+    """貼り付けたメッセージ・画像を受け付け、裏で精査する（結果は GET /api/analyze/jobs/{id} と通知タブ）。
+
+    画像は CPU だけの PC だと数分かかるので、/api/analyze のように終わるまで待たせない。
+    ローカルLLM の準備中でも受け付け、つながったら精査する。
+    """
+    ctx = _ctx(request)
+    if len(images) > MAX_PASTE_IMAGES:
+        raise HTTPException(400, f"画像は {MAX_PASTE_IMAGES} 枚までです")
+    imgs = []
+    for f in images:
+        if not (f.content_type or "").startswith("image/"):
+            raise HTTPException(400, f"画像ではないファイルです: {f.filename or '（名前なし）'}")
+        data = await f.read(MAX_PASTE_IMAGE_BYTES + 1)
+        if len(data) > MAX_PASTE_IMAGE_BYTES:
+            raise HTTPException(413, f"画像が大きすぎます（{MAX_PASTE_IMAGE_BYTES // 1024 // 1024}MB まで）: {f.filename or '（名前なし）'}")
+        if data:
+            imgs.append(ImageInput(data=data, mime=f.content_type, filename=f.filename or ""))
+    if not text.strip() and not imgs:
+        raise HTTPException(400, "メッセージまたは画像を入力してください")
+    job_id = ctx.service.submit_paste(text, imgs)
+    if ctx.queue_task:
+        ctx.queue_task.kick()
+    return ctx.service.paste_status(job_id)
+
+
+@router.get("/analyze/jobs")
+async def list_analyze_jobs(request: Request):
+    """まだ終わっていない貼り付けの一覧（画面を開き直したとき用）。"""
+    return _ctx(request).service.paste_jobs()
+
+
+@router.get("/analyze/jobs/{job_id}")
+async def analyze_job(request: Request, job_id: str):
+    return _ctx(request).service.paste_status(job_id)
 
 
 # ---------- Google カレンダー ----------

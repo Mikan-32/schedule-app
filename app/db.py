@@ -556,6 +556,29 @@ class Database:
         counts.update({r[0]: r[1] for r in rows})
         return counts
 
+    def queue_message_ids(self, source: str, prefix: str = "") -> list[str]:
+        """キューにある source のメッセージID（prefix で始まるものだけ。古い順）。"""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT message_id FROM message_queue WHERE source = ? AND substr(message_id, 1, ?) = ? ORDER BY id",
+                (source, len(prefix), prefix),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def queue_entry(self, source: str, message_id: str) -> Optional[dict]:
+        """キューにあるメッセージの状態（status / attempts / last_error / ahead=先に待っている件数）。なければ None。"""
+        with self._lock:
+            r = self._conn.execute(
+                "SELECT id, status, attempts, last_error FROM message_queue WHERE source = ? AND message_id = ?",
+                (source, message_id),
+            ).fetchone()
+            if r is None:
+                return None
+            ahead = self._conn.execute(
+                "SELECT COUNT(*) FROM message_queue WHERE status = 'waiting' AND id < ?", (r["id"],)
+            ).fetchone()[0]
+        return {"id": r["id"], "status": r["status"], "attempts": r["attempts"], "last_error": r["last_error"], "ahead": ahead}
+
     def retry_failed(self) -> int:
         with self._lock:
             cur = self._conn.execute("UPDATE message_queue SET status = 'waiting', attempts = 0 WHERE status = 'failed'")

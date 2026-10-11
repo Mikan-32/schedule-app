@@ -5,6 +5,7 @@ import asyncio
 import logging
 import re
 import unicodedata
+import uuid
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from typing import Optional, Protocol
@@ -24,6 +25,7 @@ from .models import (
     thread_key,
     with_fields,
 )
+from .formatting import format_event_line
 from .notifier import Notifier
 
 log = logging.getLogger(__name__)
@@ -46,6 +48,23 @@ _FOLLOWUP = re.compile(
 # 変更・取り消しの対象を探すとき、LLM に渡す登録済みの予定の範囲
 CANDIDATE_DAYS = 180
 CANDIDATE_LIMIT = 50
+
+# 画面から貼り付けたメッセージ・画像（再精査キューを使って裏で精査する）
+PASTE_PREFIX = "paste-"
+PASTE_CHANNEL = "貼り付け"
+PASTE_RESULTS_KEEP = 50  # 画面に返すために覚えておく精査結果の件数
+
+
+def is_paste(msg: IncomingMessage) -> bool:
+    return msg.source == "manual" and msg.message_id.startswith(PASTE_PREFIX)
+
+
+def _paste_label(msg: IncomingMessage) -> str:
+    """通知に使う呼び名（「貼り付けた画像」など）。"""
+    n = len(msg.images)
+    if n == 0:
+        return "貼り付けたメッセージ"
+    return "貼り付けた画像" if n == 1 else f"貼り付けた画像{n}枚"
 
 
 class Extractor(Protocol):
@@ -168,6 +187,8 @@ class ScheduleService:
         self.notifier = notifier
         self._save_lock = asyncio.Lock()
         self._queue_lock = asyncio.Lock()
+        self.processing: Optional[tuple[str, str]] = None  # 再精査キューで精査中のメッセージ (source, message_id)
+        self._paste_results: dict[str, dict] = {}  # 貼り付けたメッセージの精査結果（ジョブID → 結果）
 
     def today(self) -> date:
         return datetime.now(self.settings.tz).date()
@@ -298,25 +319,95 @@ class ScheduleService:
         done = 0
         async with self._queue_lock:
             for qid, msg in self.db.list_queue("waiting"):
-                candidates = self.change_candidates()
+                self.processing = (msg.source, msg.message_id)
                 try:
-                    result = await self._extract(msg, candidates, self._context(msg))
-                except LLMUnavailable as e:
-                    self.db.queue_failed(qid, str(e), None)  # 回数には数えない
+                    state = await self._process_queued(qid, msg)
+                finally:
+                    self.processing = None
+                if state == "unavailable":
                     break
-                except Exception as e:
-                    log.warning("再精査に失敗しました: %s", e)
-                    self.db.queue_failed(qid, str(e) or type(e).__name__, self.settings.queue_max_attempts)
-                    continue
-                self.db.dequeue(qid)
-                try:
-                    await self._apply_result(result, msg, candidates)
-                except Exception:
-                    log.exception("再精査したメッセージの登録に失敗しました")
-                done += 1
+                if state == "done":
+                    done += 1
         if done:
             log.info("精査待ちだったメッセージを %d 件精査しました", done)
         return done
+
+    async def _process_queued(self, qid: int, msg: IncomingMessage) -> str:
+        """キューのメッセージを 1 件精査する。done / failed / unavailable（ローカルLLM に接続できない）を返す。"""
+        candidates = self.change_candidates()
+        try:
+            result = await self._extract(msg, candidates, self._context(msg))
+        except LLMUnavailable as e:
+            self.db.queue_failed(qid, str(e), None)  # 回数には数えない
+            return "unavailable"
+        except Exception as e:
+            log.warning("再精査に失敗しました: %s", e)
+            self.db.queue_failed(qid, str(e) or type(e).__name__, self.settings.queue_max_attempts)
+            return "failed"
+        self.db.dequeue(qid)
+        try:
+            outcome = await self._apply_result(result, msg, candidates)
+        except Exception as e:
+            log.exception("再精査したメッセージの登録に失敗しました")
+            outcome = AnalysisOutcome(skipped=f"登録に失敗しました: {e}")
+        if is_paste(msg):
+            self._paste_done(msg, outcome)
+        return "done"
+
+    # ---------- 画面からの貼り付け ----------
+    def submit_paste(self, text: str, images: list[ImageInput]) -> str:
+        """画面に貼り付けたメッセージ・画像を再精査キューに入れる。精査は裏で行い、ジョブID を返す。
+
+        画像は CPU だけの PC だと数分かかるので、画面を閉じても続くように、また
+        ローカルLLM の準備中でも消えないように、精査できなかったメッセージと同じキューを使う。
+        """
+        msg = IncomingMessage(
+            source="manual",
+            message_id=f"{PASTE_PREFIX}{uuid.uuid4().hex[:12]}",
+            text=text,
+            sent_at=datetime.now(self.settings.tz),
+            channel=PASTE_CHANNEL,
+            images=images,
+        )
+        self.db.enqueue_message(msg, "", count_attempt=False)
+        return msg.message_id
+
+    def paste_status(self, job_id: str) -> dict:
+        """貼り付けたメッセージの精査の状態。
+
+        waiting（順番待ち。ahead=先に待っている件数）/ running（精査中）/ done（outcome に結果）/
+        failed（何度か失敗した）/ unknown（結果を覚えていない。アプリの再起動後など。通知タブを見てもらう）
+        """
+        if job_id in self._paste_results:
+            return {"id": job_id, "state": "done", **self._paste_results[job_id]}
+        if self.processing == ("manual", job_id):
+            return {"id": job_id, "state": "running"}
+        entry = self.db.queue_entry("manual", job_id)
+        if entry is None:
+            return {"id": job_id, "state": "unknown"}
+        if entry["status"] == "failed":
+            return {"id": job_id, "state": "failed", "error": entry["last_error"]}
+        return {"id": job_id, "state": "waiting", "ahead": entry["ahead"], "error": entry["last_error"]}
+
+    def paste_jobs(self) -> list[dict]:
+        """まだ終わっていない（失敗したものを含む）貼り付けの一覧（古い順）。画面を開き直したとき用。"""
+        return [self.paste_status(mid) for mid in self.db.queue_message_ids("manual", PASTE_PREFIX)]
+
+    def _paste_done(self, msg: IncomingMessage, outcome: AnalysisOutcome) -> None:
+        """結果を画面に返せるよう覚えておき、通知が出ない結果（見つからない・登録済み）も通知タブに残す。"""
+        self._paste_results[msg.message_id] = {
+            "outcome": outcome.to_dict(),
+            "finished_at": datetime.now(self.settings.tz).isoformat(),
+        }
+        while len(self._paste_results) > PASTE_RESULTS_KEEP:
+            self._paste_results.pop(next(iter(self._paste_results)))
+        label = _paste_label(msg)
+        if not outcome.results:
+            self.notifier.info(f"{label}: {outcome.skipped or '予定は見つかりませんでした'}")
+        dups = [r.event for r in outcome.results if r.status == "duplicate"]
+        if dups:
+            lines = "\n".join(format_event_line(e) for e in dups)
+            self.notifier.info(f"{label}: 既に登録済みの予定でした\n{lines}", event_id=dups[0].id)
 
     # ---------- 登録・重複判定 ----------
     def _interval(self, ev: Event) -> tuple[datetime, datetime]:

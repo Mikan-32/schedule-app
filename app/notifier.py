@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Protocol
+from typing import Callable, Optional, Protocol
 
 from .db import Database
 from datetime import date
@@ -80,6 +80,10 @@ class Notifier:
             except Exception:
                 log.exception("確認通知の送信に失敗しました (%s)", sink.name)
         return n
+
+    def info(self, message: str, event_id: Optional[int] = None) -> Notification:
+        """お知らせ（Web UI の通知タブにだけ残す。予定は変わらないので listeners には知らせない）。"""
+        return self.db.add_notification(Notification(kind="info", message=message, event_id=event_id))
 
     async def rejected(self, event: Event) -> Notification:
         message = f"追加しませんでした: {format_event_line(event)}"

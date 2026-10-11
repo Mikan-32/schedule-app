@@ -44,17 +44,18 @@
 
       <form id="analyze-form" class="sheet-body">
         <div class="group">
-          <textarea name="text" rows="6" placeholder="Discord などのメッセージを貼り付け&#10;例: 来週水曜の15時から定例ミーティングです。場所は会議室Aで。"></textarea>
+          <textarea name="text" rows="5" placeholder="Discord などのメッセージや画像を貼り付け&#10;例: 来週水曜の15時から定例ミーティングです。場所は会議室Aで。"></textarea>
+          <div class="thumbs" id="thumbs" hidden></div>
           <div class="row file-row">
             <label class="text-button">
-              <input type="file" name="images" accept="image/*" multiple hidden>画像を選択
+              <input type="file" id="image-input" accept="image/*" multiple hidden>画像を選択
             </label>
-            <span class="secondary" id="file-names">画像なし</span>
+            <span class="secondary" id="file-names"></span>
           </div>
         </div>
-        <p class="footnote">ローカルLLMで精査し、予定が見つかれば登録します。</p>
-        <button class="primary-button" type="submit"><span class="spinner" hidden></span><span class="label">解析する</span></button>
-        <div id="analyze-result"></div>
+        <p class="footnote" id="analyze-note"></p>
+        <button class="primary-button" type="submit"><span class="label">解析する</span></button>
+        <div id="analyze-jobs"></div>
       </form>
 
       <form id="manual-form" class="sheet-body" hidden>
@@ -71,6 +72,7 @@
     </section>
   </div>
 
+  <div class="drop-overlay" id="drop-overlay" hidden><div>画像をドロップして予定を読み取る</div></div>
   <div class="toast" id="toast" hidden></div>
   <script src="/static/app.js"></script>
 </body>

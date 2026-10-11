@@ -494,7 +494,10 @@ function renderStatus() {
   }
 
   const q = s.queue || {};
-  if (q.waiting) items.push(`<span class="item"><span class="light wait"></span>精査待ち ${q.waiting}件（ローカルLLMにつながったら自動で精査）</span>`);
+  if (q.waiting) {
+    const how = llm.available ? "順に精査しています" : "ローカルLLMにつながったら自動で精査";
+    items.push(`<span class="item"><span class="light wait"></span>精査待ち ${q.waiting}件（${how}）</span>`);
+  }
   if (q.failed) items.push(`<span class="item"><span class="light ng"></span>精査できなかったメッセージ ${q.failed}件
       <button class="text-button" id="retry-queue">再試行</button></span>`);
 
@@ -518,6 +521,8 @@ function renderStatus() {
     items.push(`<span class="item"><span class="light ${p.active ? "ok" : ""}"></span>スリープ防止: ${text}</span>`);
   }
   $("#statusbar").innerHTML = items.join("");
+  updateAnalyzeNote();
+  if (paste.jobs.some((job) => job.state === "waiting")) renderJobs(); // 「準備ができたら」の表示を最新に
 }
 
 function fmtBytes(n) {
@@ -584,12 +589,22 @@ document.addEventListener("click", async (e) => {
       await api(`/api/changes/${t.dataset.undo}/undo`, { method: "POST" });
       toast("元に戻しました");
       await Promise.all([render(), refreshStatus()]);
+    } else if (t.dataset.removeImage !== undefined) {
+      removeImage(Number(t.dataset.removeImage));
+    } else if (t.dataset.dismissJob) {
+      const job = paste.jobs.find((j) => j.id === t.dataset.dismissJob);
+      if (job) releaseJob(job);
+      paste.jobs = paste.jobs.filter((j) => j !== job);
+      renderJobs();
     } else if (t.id === "mark-read") {
       await api("/api/notifications/read", { method: "POST" });
       await Promise.all([render(), refreshStatus()]);
     } else if (t.id === "retry-queue") {
       const res = await api("/api/queue/retry", { method: "POST" });
       toast(`${res.retried}件をもう一度精査します`);
+      paste.jobs.forEach((job) => { if (job.state === "failed") job.state = "waiting"; });
+      renderJobs();
+      pollJobs();
       await refreshStatus();
     } else if (t.id === "google-disconnect") {
       if (!confirm("Google カレンダーとの連携を解除しますか？（登録済みの予定は Google カレンダーに残ります）")) return;
@@ -608,61 +623,241 @@ document.addEventListener("click", async (e) => {
 });
 
 // ---------- sheet ----------
-function openSheet() {
+function setSheetMode(mode) {
+  $$("#sheet-tabs .segment").forEach((b) => b.classList.toggle("active", b.dataset.mode === mode));
+  $("#analyze-form").hidden = mode !== "analyze";
+  $("#manual-form").hidden = mode !== "manual";
+}
+
+function openSheet(mode) {
+  if (mode) setSheetMode(mode);
+  const wasHidden = $("#sheet").hidden;
   $("#sheet").hidden = false;
   const dateInput = $("#manual-form [name=date]");
   if (!dateInput.value) dateInput.value = (state.tab === "events" && state.cal.selected) || todayIso();
-  $("#analyze-form textarea").focus();
+  if (wasHidden && !$("#analyze-form").hidden) $("#analyze-form textarea").focus();
 }
-function closeSheet() { $("#sheet").hidden = true; }
+function closeSheet() {
+  $("#sheet").hidden = true;
+  // 終わった解析の結果は、閉じたら片付ける（精査中のものは残して、次に開いたときにも表示する）
+  paste.jobs = paste.jobs.filter((job) => isActiveJob(job) || (releaseJob(job), false));
+  renderJobs();
+}
 
-$("#open-sheet").addEventListener("click", openSheet);
+$("#open-sheet").addEventListener("click", () => openSheet());
 $("#close-sheet").addEventListener("click", closeSheet);
 $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSheet(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#sheet").hidden) closeSheet(); });
 
 $$("#sheet-tabs .segment").forEach((btn) => btn.addEventListener("click", (e) => {
   e.preventDefault();
-  $$("#sheet-tabs .segment").forEach((b) => b.classList.toggle("active", b === btn));
-  $("#analyze-form").hidden = btn.dataset.mode !== "analyze";
-  $("#manual-form").hidden = btn.dataset.mode !== "manual";
+  setSheetMode(btn.dataset.mode);
 }));
 
-$("#analyze-form [type=file]").addEventListener("change", (e) => {
-  const names = [...e.target.files].map((f) => f.name);
-  $("#file-names").textContent = names.length ? names.join(", ") : "画像なし";
-});
-
 const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み", merged: "まとめた", updated: "変更", cancelled: "取り消し", change_pending: "確認待ち", skipped: "見送り" };
+
+// ---------- 貼り付け（文章・画像）→ 裏で解析 ----------
+// 画像は CPU だけの PC だと数分かかるので、送ったらすぐ次を貼れるようにし、結果はあとから表示する
+const MAX_IMAGES = 4;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const PASTE_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘V" : "Ctrl+V";
+const paste = { images: [], jobs: [], timer: null }; // images: [{ file, url }] / jobs: 送った解析（新しい順）
+
+const isActiveJob = (job) => job.state === "waiting" || job.state === "running";
+function releaseJob(job) { (job.urls || []).forEach((u) => URL.revokeObjectURL(u)); }
+
+function addImages(files) {
+  let added = 0;
+  for (const file of [...files].filter((f) => f.type.startsWith("image/"))) {
+    if (paste.images.length >= MAX_IMAGES) { toast(`画像は${MAX_IMAGES}枚までです`); break; }
+    if (file.size > MAX_IMAGE_BYTES) { toast(`画像が大きすぎます（20MBまで）: ${file.name}`); continue; }
+    paste.images.push({ file, url: URL.createObjectURL(file) });
+    added++;
+  }
+  renderThumbs();
+  return added;
+}
+
+function removeImage(index) {
+  const [img] = paste.images.splice(index, 1);
+  if (img) URL.revokeObjectURL(img.url);
+  renderThumbs();
+}
+
+function renderThumbs() {
+  const box = $("#thumbs");
+  box.hidden = !paste.images.length;
+  box.innerHTML = paste.images.map((img, i) => `
+    <div class="thumb"><img src="${img.url}" alt="${esc(img.file.name || "貼り付けた画像")}">
+      <button type="button" class="thumb-remove" data-remove-image="${i}" aria-label="この画像を外す" title="外す">×</button></div>`).join("");
+  $("#file-names").textContent = paste.images.length
+    ? `画像 ${paste.images.length}枚（あと${MAX_IMAGES - paste.images.length}枚）`
+    : `${PASTE_KEY}・ドラッグでも追加できます`;
+  updateAnalyzeNote();
+}
+
+function updateAnalyzeNote() {
+  const llm = state.status?.llm;
+  const noVision = paste.images.length > 0 && llm?.available && !llm.vision_model;
+  const note = $("#analyze-note");
+  note.classList.toggle("warn", !!noVision);
+  note.textContent = noVision
+    ? "今のローカルLLMは画像を読めないため、画像は精査されません（画像対応のモデルを入れてください）"
+    : "ローカルLLMで精査し、予定が見つかれば登録します。画像は数分かかることがあります（閉じても続きます）。";
+}
+
+function elapsedLabel(since) {
+  const sec = Math.max(0, Math.floor((Date.now() - since) / 1000));
+  return `${Math.floor(sec / 60)}:${pad2(sec % 60)}`;
+}
+
+function jobStatus(job) {
+  const spin = `<span class="spinner gray"></span>`;
+  switch (job.state) {
+    case "running":
+      return `<div class="line">${spin}ローカルLLMで精査中… ${elapsedLabel(job.runningSince || Date.now())}</div>`;
+    case "waiting":
+      if (state.status && !state.status.llm.available) return `<div class="line">${spin}ローカルLLMの準備ができたら精査します</div>`;
+      return `<div class="line">${spin}${job.ahead ? `順番待ち（先に${job.ahead}件）` : "まもなく精査します"}</div>`;
+    case "done": {
+      const rs = job.outcome.results;
+      if (!rs.length) return `<div class="line">${esc(job.outcome.skipped || "予定は見つかりませんでした")}</div>`;
+      return rs.map((r) => `<div class="job-result"><span class="result-tag ${r.status}">${RESULT_TAG[r.status]}</span><span>${esc(r.event.label)}</span></div>`).join("");
+    }
+    case "failed":
+      return `<div class="line error">精査できませんでした${job.error ? `（${esc(job.error)}）` : ""}</div>
+        <div class="line"><button type="button" class="text-button" id="retry-queue">もう一度精査する</button></div>`;
+    default:
+      return `<div class="line">結果は「通知」タブで確認できます</div>`;
+  }
+}
+
+function renderJobs() {
+  const box = $("#analyze-jobs");
+  if (!paste.jobs.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="group">${paste.jobs.map((job) => {
+    const n = job.urls?.length || 0;
+    const title = job.text ? esc(job.text.split("\n")[0].slice(0, 60)) : n ? `画像${n > 1 ? ` ${n}枚` : ""}` : "貼り付けたメッセージ";
+    return `<div class="row job-row">
+      ${n ? `<div class="job-thumbs">${job.urls.map((u) => `<img src="${u}" alt="">`).join("")}</div>` : ""}
+      <div class="job-body"><div class="job-title">${title}</div><div class="job-status">${jobStatus(job)}</div></div>
+      ${isActiveJob(job) ? "" : `<button type="button" class="text-button job-dismiss" data-dismiss-job="${esc(job.id)}" aria-label="結果を閉じる" title="閉じる">×</button>`}
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function jobFinished(job) {
+  if (job.state === "done") {
+    const rs = job.outcome.results;
+    toast(rs.length ? `${RESULT_TAG[rs[0].status]}: ${rs[0].event.label}${rs.length > 1 ? `（ほか${rs.length - 1}件）` : ""}` : "貼り付けた内容から予定は見つかりませんでした");
+  } else if (job.state === "failed") {
+    toast("貼り付けた内容を精査できませんでした");
+  }
+  render();
+  refreshStatus();
+}
+
+async function pollJobs() {
+  clearTimeout(paste.timer);
+  const active = paste.jobs.filter(isActiveJob);
+  if (!active.length) return;
+  await Promise.all(active.map(async (job) => {
+    try {
+      const next = await api(`/api/analyze/jobs/${encodeURIComponent(job.id)}`);
+      if (next.state === "running" && job.state !== "running") job.runningSince = Date.now();
+      Object.assign(job, next);
+      if (!isActiveJob(job)) jobFinished(job);
+    } catch (_) { /* サーバー停止中など。次の確認でやり直す */ }
+  }));
+  renderJobs();
+  paste.timer = setTimeout(pollJobs, 3000);
+}
+
+$("#image-input").addEventListener("change", (e) => {
+  addImages(e.target.files);
+  e.target.value = "";
+});
 
 $("#analyze-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = e.target;
+  const textarea = $("textarea", form);
+  if (!textarea.value.trim() && !paste.images.length) {
+    toast("メッセージを入力するか、画像を貼り付けてください");
+    return;
+  }
+  const body = new FormData();
+  body.append("text", textarea.value);
+  paste.images.forEach((img) => body.append("images", img.file, img.file.name || "image.png"));
   const button = $("button[type=submit]", form);
-  const out = $("#analyze-result");
   button.disabled = true;
-  $(".spinner", button).hidden = false;
-  $(".label", button).textContent = "ローカルLLMで精査中…";
-  out.innerHTML = "";
   try {
-    const res = await api("/api/analyze", { method: "POST", body: new FormData(form) });
-    if (!res.results.length) {
-      out.innerHTML = `<p class="secondary" style="text-align:center">${esc(res.skipped || "予定は見つかりませんでした")}</p>`;
-    } else {
-      out.innerHTML = `<div class="group">${res.results.map((r) => `
-        <div class="row"><span class="result-tag ${r.status}">${RESULT_TAG[r.status]}</span>
-        <span>${esc(r.event.label)}</span></div>`).join("")}</div>`;
-      form.reset();
-      $("#file-names").textContent = "画像なし";
-    }
-    await Promise.all([render(), refreshStatus()]);
+    const job = await api("/api/analyze/jobs", { method: "POST", body });
+    // 画像の URL は結果の表示に使うので、ここでは解放しない（結果を閉じたときに解放する）
+    paste.jobs.unshift({ ...job, urls: paste.images.map((img) => img.url), text: textarea.value.trim() });
+    paste.images = [];
+    form.reset();
+    renderThumbs();
+    renderJobs();
+    refreshStatus();
+    pollJobs();
   } catch (err) {
-    out.innerHTML = `<p class="secondary" style="text-align:center;color:var(--red)">${esc(err.message)}</p>`;
+    toast(err.message);
   } finally {
     button.disabled = false;
-    $(".spinner", button).hidden = true;
-    $(".label", button).textContent = "解析する";
   }
+});
+
+// どの画面でも Ctrl+V で画像を貼り付けたら、解析シートを開いて追加する
+const isEditable = (el) => !!el?.closest?.("input, textarea, select, [contenteditable]");
+document.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith("image/"));
+  if (files.length) {
+    e.preventDefault();
+    openSheet("analyze");
+    const n = addImages(files);
+    if (n) toast(n > 1 ? `画像を${n}枚追加しました` : "画像を追加しました");
+    return;
+  }
+  // シートを閉じているときに文章を貼り付けたら、解析シートを開いて本文に入れる
+  if ($("#sheet").hidden && !isEditable(e.target)) {
+    const text = e.clipboardData?.getData("text/plain") || "";
+    if (!text.trim()) return;
+    e.preventDefault();
+    openSheet("analyze");
+    const textarea = $("#analyze-form textarea");
+    textarea.value = textarea.value ? `${textarea.value}\n${text}` : text;
+  }
+});
+
+// 画像ファイルを画面にドラッグ＆ドロップしても追加できる
+let dragDepth = 0;
+const draggingFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+document.addEventListener("dragenter", (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  $("#drop-overlay").hidden = false;
+});
+document.addEventListener("dragover", (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+});
+document.addEventListener("dragleave", (e) => {
+  if (!draggingFiles(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $("#drop-overlay").hidden = true;
+});
+document.addEventListener("drop", (e) => {
+  if (!draggingFiles(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  $("#drop-overlay").hidden = true;
+  const images = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
+  if (!images.length) { toast("画像ファイルをドロップしてください"); return; }
+  openSheet("analyze");
+  addImages(images);
 });
 
 $("#manual-form").addEventListener("submit", async (e) => {
@@ -691,5 +886,12 @@ $("#manual-form").addEventListener("submit", async (e) => {
   document.body.dataset.tab = state.tab;
   $("#today-label").textContent = `${now.getMonth() + 1}月${now.getDate()}日 ${WEEKDAYS[now.getDay()]}曜日`;
   refreshStatus().then(() => render(true));
+  renderThumbs();
+  // 画面を開き直したときも、まだ終わっていない解析を表示する
+  api("/api/analyze/jobs").then((jobs) => {
+    paste.jobs = jobs.map((job) => ({ ...job, urls: [], text: "" }));
+    renderJobs();
+    pollJobs();
+  }).catch(() => {});
   setInterval(() => { refreshStatus(); if ($("#sheet").hidden) render(); }, 5000);
 })();
