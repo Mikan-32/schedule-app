@@ -109,6 +109,14 @@ def create_app(
     app.include_router(router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    @app.middleware("http")
+    async def revalidate_ui(request: Request, call_next):
+        # アプリを更新したあとに、ブラウザが古い画面（app.js など）を使い続けないよう、毎回確認させる
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     @app.get("/", include_in_schema=False)
     async def index(request: Request, code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
         # Google の連携画面から戻ってきたとき（リダイレクト先を http://127.0.0.1:<port>/ にしている）

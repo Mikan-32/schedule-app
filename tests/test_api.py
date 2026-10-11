@@ -45,3 +45,12 @@ def test_api_flow(tmp_path: Path, future):
         kinds = [n["kind"] for n in c.get("/api/notifications").json()]
         assert kinds == ["added", "conflict", "added"]
         assert c.delete(f"/api/events/{eid}").json()["ok"]
+
+
+def test_ui_is_revalidated_after_update(tmp_path: Path):
+    # 更新後に古い app.js がブラウザに残らないよう、画面のファイルは毎回確認させる
+    settings = Settings(db_path=tmp_path / "t.db", discord_token="")
+    with TestClient(create_app(settings, llm=FakeLLM(), start_connectors=False)) as c:
+        assert c.get("/").headers["cache-control"] == "no-cache"
+        assert c.get("/static/app.js").headers["cache-control"] == "no-cache"
+        assert "cache-control" not in c.get("/api/status").headers
