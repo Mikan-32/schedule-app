@@ -1,6 +1,7 @@
 """アプリ本体: Web サーバー + 各連絡ツールのコネクタ を 1 プロセスで動かす。"""
 from __future__ import annotations
 
+import hashlib
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -9,7 +10,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .background import PeriodicTask
@@ -25,6 +26,19 @@ from .web.api import google_callback_page, router
 
 log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+
+def _index_html() -> str:
+    """index.html の CSS / JS の URL に中身から作った版（?v=…）を付ける。
+
+    Cache-Control: no-cache を付ける前に読み込んだ古い style.css などがブラウザに残っていても、
+    URL が変わるので必ず新しいファイルを読み込ませる。
+    """
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("style.css", "app.js"):
+        digest = hashlib.sha1((STATIC_DIR / name).read_bytes()).hexdigest()[:10]
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={digest}"')
+    return html
 
 
 @dataclass
@@ -123,6 +137,6 @@ def create_app(
         gcal = request.app.state.ctx.gcal
         if state and (code or error) and gcal and gcal.has_pending(state):
             return await google_callback_page(gcal, code, state, error)
-        return FileResponse(STATIC_DIR / "index.html")
+        return HTMLResponse(_index_html())
 
     return app

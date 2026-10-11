@@ -54,3 +54,17 @@ def test_ui_is_revalidated_after_update(tmp_path: Path):
         assert c.get("/").headers["cache-control"] == "no-cache"
         assert c.get("/static/app.js").headers["cache-control"] == "no-cache"
         assert "cache-control" not in c.get("/api/status").headers
+
+
+def test_ui_assets_are_versioned(tmp_path: Path):
+    # 古い style.css がキャッシュに残っていても読み直されるよう、URL に中身の版を付ける
+    import re
+
+    settings = Settings(db_path=tmp_path / "t.db", discord_token="")
+    with TestClient(create_app(settings, llm=FakeLLM(), start_connectors=False)) as c:
+        html = c.get("/").text
+        css = re.search(r'"(/static/style\.css\?v=[0-9a-f]{10})"', html)
+        js = re.search(r'"(/static/app\.js\?v=[0-9a-f]{10})"', html)
+        assert css and js
+        assert c.get(css.group(1)).status_code == 200
+        assert c.get(js.group(1)).status_code == 200
