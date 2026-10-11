@@ -118,6 +118,57 @@ button { font: inherit; color: inherit; }
 .empty h3 { margin: 0 0 4px; color: var(--label); font-size: 20px; font-weight: 600; }
 .empty p { margin: 0; font-size: 15px; }
 
+/* ---------- Calendar ---------- */
+.cal-header { display: flex; align-items: center; justify-content: space-between; margin: 16px 4px 10px 16px; }
+.cal-title { margin: 0; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cal-nav { display: flex; align-items: center; gap: 2px; }
+.cal-nav .icon-button { width: 32px; height: 32px; background: transparent; }
+.cal-nav .icon-button svg { width: 20px; height: 20px; stroke-width: 2.2; }
+.cal-nav .text-button { padding: 4px 8px; }
+
+.calendar .weekdays, .calendar .days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.calendar .weekdays { padding: 8px 0 6px; }
+.calendar .weekdays span { text-align: center; font-size: 12px; font-weight: 600; color: var(--secondary); }
+.calendar .day {
+  border: 0; border-top: 0.5px solid var(--separator); background: transparent; cursor: pointer; text-align: left;
+  min-width: 0; min-height: 92px; padding: 4px 3px 6px; display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+}
+.calendar .day:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; border-radius: 8px; }
+.calendar .num {
+  align-self: center; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; transition: background .15s;
+}
+.calendar .weekend .num { color: var(--secondary); }
+.calendar .outside .num { color: var(--tertiary); }
+.calendar .today .num { color: var(--red); font-weight: 700; }
+.calendar .day:hover:not(.selected) .num { background: var(--fill); }
+.calendar .selected .num { background: var(--label); color: var(--card); font-weight: 700; }
+.calendar .today.selected .num { background: var(--red); color: #fff; }
+
+.calendar .chips { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.calendar .chip {
+  display: flex; align-items: center; gap: 3px; min-width: 0; padding: 0 4px; border-radius: 4px;
+  font-size: 11px; line-height: 16px; white-space: nowrap; overflow: hidden;
+}
+.calendar .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); flex-shrink: 0; }
+.calendar .chip.allday { background: rgba(52, 199, 89, .18); }
+.calendar .chip.allday::before { background: var(--green); }
+.calendar .chip-time { color: var(--secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.calendar .chip-title { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.calendar .outside .chip { opacity: .5; }
+.calendar .more { padding: 0 4px; font-size: 11px; color: var(--secondary); }
+.calendar .dots { display: none; }
+
+/* 狭い画面（スマホ）では iPhone のカレンダーのように点だけ */
+@media (max-width: 560px) {
+  .calendar .day { min-height: 52px; align-items: center; padding: 4px 0 6px; }
+  .calendar .chips { display: none; }
+  .calendar .dots { display: flex; justify-content: center; gap: 3px; height: 5px; }
+  .calendar .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
+  .calendar .dots i.allday { background: var(--green); }
+  .calendar .outside .dots { opacity: .5; }
+}
+
 /* ---------- Pending card ---------- */
 .pending-card { margin-top: 16px; }
 .pending-card .heading { padding: 14px 16px 4px; font-size: 13px; color: var(--orange); font-weight: 600; }

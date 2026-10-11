@@ -3,7 +3,7 @@
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const state = { tab: "events", status: null, lastRender: "" };
+const state = { tab: "events", status: null, lastRender: "", renderSeq: 0, cal: { month: null, selected: null } };
 
 // ---------- utils ----------
 function esc(value) {
@@ -23,6 +23,15 @@ async function api(path, options = {}) {
 function parseDate(iso) {
   const [y, m, d] = iso.split("-").map(Number);
   return new Date(y, m - 1, d);
+}
+
+const pad2 = (n) => String(n).padStart(2, "0");
+function toIso(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function todayIso() {
+  return state.status?.today || toIso(new Date());
 }
 
 function dateLabel(iso) {
@@ -90,22 +99,93 @@ function empty(glyph, title, text) {
 }
 
 // ---------- render ----------
+// ---------- calendar ----------
+const CHIP_MAX = 3; // 1 日のマスに並べる予定の数（残りは「他N件」）
+
+function monthOf(iso) {
+  const d = parseDate(iso);
+  return toIso(new Date(d.getFullYear(), d.getMonth(), 1));
+}
+
+// 月の表示範囲（日曜始まり。必要な週だけ）
+function calendarRange(monthIso) {
+  const first = parseDate(monthIso);
+  const lastDay = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  const weeks = Math.ceil((first.getDay() + lastDay) / 7);
+  const start = new Date(first.getFullYear(), first.getMonth(), 1 - first.getDay());
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + weeks * 7 - 1);
+  return { first, start, end, weeks };
+}
+
+function selectDay(iso) {
+  state.cal.selected = iso;
+  state.cal.month = monthOf(iso);
+}
+
+function moveMonth(dir) {
+  const today = todayIso();
+  if (dir === "today") return selectDay(today);
+  const cur = parseDate(state.cal.month || monthOf(today));
+  const next = toIso(new Date(cur.getFullYear(), cur.getMonth() + (dir === "prev" ? -1 : 1), 1));
+  // 今月に戻ったら今日、それ以外は 1 日を選ぶ
+  selectDay(monthOf(today) === next ? today : next);
+}
+
+function calendarChip(ev) {
+  const time = ev.all_day ? "" : `<span class="chip-time">${esc(ev.start_time)}</span>`;
+  return `<span class="chip ${ev.all_day ? "allday" : ""}">${time}<span class="chip-title">${esc(ev.title)}</span></span>`;
+}
+
 async function renderEvents() {
-  const events = await api("/api/events");
-  if (!events.length) return empty("○", "予定はありません", "Discord などのメッセージや通知から予定が見つかるとここに表示されます");
-  const today = state.status?.today || new Date().toISOString().slice(0, 10);
+  const today = todayIso();
+  const cal = state.cal;
+  if (!cal.selected) selectDay(today);
+  const { first, start, end, weeks } = calendarRange(cal.month);
+  const selected = cal.selected;
+  const events = await api(`/api/events?date_from=${toIso(start)}&date_to=${toIso(end)}`);
   const byDate = new Map();
   for (const ev of events) {
     if (!byDate.has(ev.date)) byDate.set(ev.date, []);
     byDate.get(ev.date).push(ev);
   }
-  let html = "";
-  for (const [date, list] of byDate) {
-    const rel = relativeDay(date, today);
-    html += `<div class="section-header"><strong class="${rel === "今日" ? "today" : ""}">${dateLabel(date)}</strong><span>${rel}</span></div>`;
-    html += `<div class="group">${list.map((ev) => eventRow(ev)).join("")}</div>`;
+
+  let cells = "";
+  for (let i = 0; i < weeks * 7; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+    const iso = toIso(d);
+    const list = byDate.get(iso) || [];
+    const cls = ["day"];
+    if (d.getMonth() !== first.getMonth()) cls.push("outside");
+    if (d.getDay() === 0 || d.getDay() === 6) cls.push("weekend");
+    if (iso === today) cls.push("today");
+    if (iso === selected) cls.push("selected");
+    const more = list.length - CHIP_MAX;
+    cells += `
+      <button class="${cls.join(" ")}" data-day="${iso}" aria-pressed="${iso === selected}"
+        aria-label="${dateLabel(iso)}${iso === today ? " 今日" : ""}${list.length ? ` 予定${list.length}件` : ""}">
+        <span class="num">${d.getDate()}</span>
+        <span class="chips">${list.slice(0, CHIP_MAX).map(calendarChip).join("")}${more > 0 ? `<span class="more">他${more}件</span>` : ""}</span>
+        <span class="dots">${list.slice(0, 3).map((ev) => `<i class="${ev.all_day ? "allday" : ""}"></i>`).join("")}</span>
+      </button>`;
   }
-  return html;
+
+  const dayEvents = byDate.get(selected) || [];
+  const rel = relativeDay(selected, today);
+  return `
+    <div class="cal-header">
+      <h2 class="cal-title">${first.getFullYear()}年${first.getMonth() + 1}月</h2>
+      <div class="cal-nav">
+        <button class="icon-button" data-cal-nav="prev" aria-label="前の月" title="前の月"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+        <button class="text-button" data-cal-nav="today">今日</button>
+        <button class="icon-button" data-cal-nav="next" aria-label="次の月" title="次の月"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+      </div>
+    </div>
+    <div class="group calendar">
+      <div class="weekdays" aria-hidden="true">${WEEKDAYS.map((w) => `<span>${w}</span>`).join("")}</div>
+      <div class="days">${cells}</div>
+    </div>
+    <div class="section-header"><strong class="${rel === "今日" ? "today" : ""}">${dateLabel(selected)}</strong><span>${rel}</span></div>
+    <div class="group">${dayEvents.length ? dayEvents.map((ev) => eventRow(ev)).join("") : `<div class="row secondary">予定はありません</div>`}</div>`;
 }
 
 function changeCard({ kind, change, event, after, conflicts }) {
@@ -174,14 +254,18 @@ async function renderNotifications() {
 
 async function render(force = false) {
   const renderer = { events: renderEvents, pending: renderPending, notifications: renderNotifications }[state.tab];
+  const seq = ++state.renderSeq;
   try {
     const html = await renderer();
+    if (seq !== state.renderSeq) return; // 後から始まった描画があれば、そちらに任せる
     if (force || html !== state.lastRender) {
       $("#content").innerHTML = html;
       state.lastRender = html;
     }
   } catch (e) {
+    if (seq !== state.renderSeq) return;
     $("#content").innerHTML = empty("!", "読み込みに失敗しました", e.message);
+    state.lastRender = "";
   }
 }
 
@@ -277,6 +361,14 @@ document.addEventListener("click", async (e) => {
       $$(".navbar .segment").forEach((b) => b.classList.toggle("active", b === t));
       state.tab = t.dataset.tab;
       await render(true);
+    } else if (t.dataset.day) {
+      selectDay(t.dataset.day);
+      await render(true);
+      $(`[data-day="${t.dataset.day}"]`)?.focus();
+    } else if (t.dataset.calNav) {
+      moveMonth(t.dataset.calNav);
+      await render(true);
+      $(`[data-cal-nav="${t.dataset.calNav}"]`)?.focus();
     } else if (t.dataset.delete) {
       if (!confirm("この予定を削除しますか？")) return;
       await api(`/api/events/${t.dataset.delete}`, { method: "DELETE" });
@@ -338,7 +430,7 @@ document.addEventListener("click", async (e) => {
 function openSheet() {
   $("#sheet").hidden = false;
   const dateInput = $("#manual-form [name=date]");
-  if (!dateInput.value) dateInput.value = state.status?.today || new Date().toISOString().slice(0, 10);
+  if (!dateInput.value) dateInput.value = (state.tab === "events" && state.cal.selected) || todayIso();
   $("#analyze-form textarea").focus();
 }
 function closeSheet() { $("#sheet").hidden = true; }
