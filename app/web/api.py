@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
 from ..gcal import GoogleAuthError
+from ..holidays import holidays_between
 from ..llm import LLMUnavailable
 from ..models import Event, ImageInput, IncomingMessage
 from ..service import _parse_time
@@ -80,6 +81,16 @@ async def list_events(request: Request, date_from: Optional[date] = None, date_t
         date_from = ctx.service.today()
     events = ctx.db.list_events(statuses=("confirmed",), date_from=date_from, date_to=date_to)
     return [e.to_dict() for e in events]
+
+
+@router.get("/holidays")
+async def list_holidays(date_from: date, date_to: date):
+    """カレンダーに表示する祝日・休日（date_from〜date_to、両端を含む）。"""
+    if date_to < date_from:
+        raise HTTPException(400, "date_to は date_from 以降にしてください")
+    if (date_to - date_from).days > 400:
+        raise HTTPException(400, "期間は 400 日以内にしてください")
+    return [{"date": d.isoformat(), "name": name} for d, name in holidays_between(date_from, date_to)]
 
 
 @router.post("/events")

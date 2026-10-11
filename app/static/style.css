@@ -119,6 +119,24 @@ button { font: inherit; color: inherit; }
 .empty p { margin: 0; font-size: 15px; }
 
 /* ---------- Calendar ---------- */
+/* 連絡元ごとの色（Apple のシステムカラー。赤は今日・祝日、オレンジは確認待ちに使うので避ける） */
+.app-discord { --c: #5856d6; }
+.app-slack { --c: #af52de; }
+.app-teams { --c: #30b0c7; }
+.app-zoom { --c: #007aff; }
+.app-line { --c: #34c759; }
+.app-manual { --c: #a2845e; }
+.app-other { --c: #8e8e93; }
+@media (prefers-color-scheme: dark) {
+  .app-discord { --c: #5e5ce6; }
+  .app-slack { --c: #bf5af2; }
+  .app-teams { --c: #40c8e0; }
+  .app-zoom { --c: #0a84ff; }
+  .app-line { --c: #30d158; }
+  .app-manual { --c: #ac8e68; }
+  .app-other { --c: #98989d; }
+}
+
 .cal-header { display: flex; align-items: center; justify-content: space-between; margin: 16px 4px 10px 16px; }
 .cal-title { margin: 0; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .cal-nav { display: flex; align-items: center; gap: 2px; }
@@ -129,44 +147,134 @@ button { font: inherit; color: inherit; }
 .calendar .weekdays, .calendar .days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .calendar .weekdays { padding: 8px 0 6px; }
 .calendar .weekdays span { text-align: center; font-size: 12px; font-weight: 600; color: var(--secondary); }
+.calendar .weekdays span:first-child { color: var(--red); }
+.calendar .weekdays span:last-child { color: var(--blue); }
 .calendar .day {
   border: 0; border-top: 0.5px solid var(--separator); background: transparent; cursor: pointer; text-align: left;
   min-width: 0; min-height: 92px; padding: 4px 3px 6px; display: flex; flex-direction: column; align-items: stretch; gap: 3px;
+  transition: background .15s;
 }
+.calendar .day:hover { background: rgba(118, 118, 128, .06); }
+.calendar .day.selected { background: var(--fill); }
 .calendar .day:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; border-radius: 8px; }
 .calendar .num {
   align-self: center; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
-  font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums; transition: background .15s;
+  font-size: 15px; font-weight: 500; font-variant-numeric: tabular-nums;
 }
-.calendar .weekend .num { color: var(--secondary); }
-.calendar .outside .num { color: var(--tertiary); }
-.calendar .today .num { color: var(--red); font-weight: 700; }
-.calendar .day:hover:not(.selected) .num { background: var(--fill); }
+.calendar .sat .num { color: var(--blue); }
+.calendar .sun .num, .calendar .holiday .num { color: var(--red); }
 .calendar .selected .num { background: var(--label); color: var(--card); font-weight: 700; }
-.calendar .today.selected .num { background: var(--red); color: #fff; }
+.calendar .today .num { background: var(--red); color: #fff; font-weight: 700; }
+.calendar .outside .num, .calendar .outside .chips, .calendar .outside .dots { opacity: .4; }
 
 .calendar .chips { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.calendar .holiday-label {
+  padding: 0 4px; font-size: 11px; line-height: 15px; color: var(--red);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .calendar .chip {
   display: flex; align-items: center; gap: 3px; min-width: 0; padding: 0 4px; border-radius: 4px;
   font-size: 11px; line-height: 16px; white-space: nowrap; overflow: hidden;
 }
-.calendar .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--blue); flex-shrink: 0; }
-.calendar .chip.allday { background: rgba(52, 199, 89, .18); }
-.calendar .chip.allday::before { background: var(--green); }
+.calendar .chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--c); flex-shrink: 0; }
+.calendar .chip.allday { background: color-mix(in srgb, var(--c) 22%, transparent); font-weight: 600; }
+.calendar .chip.allday::before { display: none; }
 .calendar .chip-time { color: var(--secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+/* マスが狭いときは時刻を省いて予定名を優先 */
+.calendar { container-type: inline-size; }
+@container (max-width: 700px) { .calendar .chip-time { display: none; } }
 .calendar .chip-title { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.calendar .outside .chip { opacity: .5; }
 .calendar .more { padding: 0 4px; font-size: 11px; color: var(--secondary); }
 .calendar .dots { display: none; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 16px 0; font-size: 12px; color: var(--secondary); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+
+.section-header .sub, .day-panel-header .sub { display: inline-flex; gap: 8px; }
+.holiday-name { color: var(--red); }
+.day-list .event-row .bar { background: var(--c); }
+
+/* 右側（広い画面だけ）: 次の予定・選んだ日の時間軸 */
+.cal-side { display: none; }
+.next-up {
+  position: relative; display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 14px 16px 14px 20px;
+  border: 0; text-align: left; color: var(--label); font: inherit;
+}
+.next-up::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: var(--c); }
+button.next-up { cursor: pointer; transition: background .15s; }
+button.next-up:hover { background: color-mix(in srgb, var(--c) 7%, var(--card)); }
+.next-up:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.next-label { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; color: var(--secondary); }
+.next-label .until { color: var(--c); }
+.next-title { margin-top: 2px; font-size: 20px; font-weight: 700; overflow-wrap: anywhere; }
+.next-when { font-size: 15px; font-variant-numeric: tabular-nums; }
+.next-meta { font-size: 13px; color: var(--secondary); }
+
+.day-panel-header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 14px 16px 10px; }
+.day-panel-header strong { font-size: 17px; font-weight: 700; }
+.day-panel-header strong.today { color: var(--red); }
+.day-panel-header .sub { font-size: 13px; color: var(--secondary); }
+.day-panel > .row.secondary { border-top: 0.5px solid var(--separator); }
+
+.allday-row { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px 10px 0; border-top: 0.5px solid var(--separator); }
+.allday-label { width: 44px; flex-shrink: 0; padding-top: 4px; text-align: right; font-size: 11px; color: var(--secondary); }
+.allday-list { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.allday-pill {
+  display: flex; align-items: center; gap: 4px; min-width: 0; padding: 2px 2px 2px 8px; border-radius: 6px;
+  background: color-mix(in srgb, var(--c) 22%, transparent); font-size: 13px; font-weight: 600; line-height: 20px;
+}
+.allday-pill .pill-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.timeline { padding: 12px 12px 14px 0; border-top: 0.5px solid var(--separator); }
+.tl-grid { position: relative; margin-top: 6px; }
+.tl-grid .hour { position: absolute; left: 50px; right: 0; border-top: 0.5px solid var(--separator); }
+.tl-grid .hour span {
+  position: absolute; right: 100%; top: -7px; padding-right: 6px; font-size: 11px; line-height: 14px;
+  color: var(--secondary); font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.tl-events { position: absolute; top: 0; bottom: 0; left: 52px; right: 0; }
+.tl-event {
+  position: absolute; display: flex; flex-direction: column; gap: 1px; overflow: hidden; padding: 3px 24px 3px 7px;
+  border-radius: 6px; border-left: 3px solid var(--c); background: color-mix(in srgb, var(--c) 18%, var(--card));
+  font-size: 12px; line-height: 15px;
+}
+.tl-event .tl-time { font-size: 11px; color: var(--secondary); font-variant-numeric: tabular-nums; }
+.tl-event .tl-title {
+  font-weight: 600; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.tl-event .tl-meta { font-size: 11px; color: var(--secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tl-event .tl-meta a { color: var(--blue); text-decoration: none; }
+.tl-event.short { flex-direction: row; align-items: center; gap: 6px; white-space: nowrap; }
+.tl-event.short .tl-title { display: block; text-overflow: ellipsis; }
+.now-line { position: absolute; left: 48px; right: 0; z-index: 2; border-top: 2px solid var(--red); pointer-events: none; }
+.now-line::before { content: ""; position: absolute; left: -4px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+
+.tl-event .delete, .allday-pill .delete {
+  width: 22px; height: 22px; flex-shrink: 0; background: transparent; color: var(--red); opacity: 0; transition: opacity .15s;
+}
+.tl-event .delete { position: absolute; top: 1px; right: 1px; }
+.tl-event .delete svg, .allday-pill .delete svg { width: 13px; height: 13px; }
+.tl-event:hover .delete, .allday-pill:hover .delete, .tl-event .delete:focus-visible, .allday-pill .delete:focus-visible { opacity: 1; }
+@media (hover: none) { .tl-event .delete, .allday-pill .delete { opacity: 1; } }
+
+/* 広い画面: macOS のカレンダーのように 2 列（左に月、右に次の予定と選んだ日） */
+@media (min-width: 960px) {
+  .navbar-inner { max-width: 1180px; }
+  .navbar .segmented { max-width: 560px; }
+  body[data-tab="events"] .content { max-width: 1180px; }
+  .cal-layout { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 24px; align-items: start; }
+  .cal-side { display: flex; flex-direction: column; gap: 16px; padding-top: 16px; }
+  .day-list { display: none; }
+  .calendar .day { min-height: 108px; }
+}
 
 /* 狭い画面（スマホ）では iPhone のカレンダーのように点だけ */
 @media (max-width: 560px) {
   .calendar .day { min-height: 52px; align-items: center; padding: 4px 0 6px; }
   .calendar .chips { display: none; }
   .calendar .dots { display: flex; justify-content: center; gap: 3px; height: 5px; }
-  .calendar .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
-  .calendar .dots i.allday { background: var(--green); }
-  .calendar .outside .dots { opacity: .5; }
+  .calendar .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--c); }
 }
 
 /* ---------- Pending card ---------- */

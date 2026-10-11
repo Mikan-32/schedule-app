@@ -3,7 +3,7 @@
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
-const state = { tab: "events", status: null, lastRender: "", renderSeq: 0, cal: { month: null, selected: null } };
+const state = { tab: "events", status: null, lastRender: "", renderSeq: 0, cal: { month: null, selected: null }, holidays: new Map() };
 
 // ---------- utils ----------
 function esc(value) {
@@ -82,7 +82,7 @@ function eventRow(ev, { deletable = true } = {}) {
   const barClass = ev.status === "pending" ? "pending" : ev.all_day ? "allday" : "";
   const meta = sourceMeta(ev);
   return `
-    <div class="row event-row">
+    <div class="row event-row app-${appOf(ev)}">
       <div class="time">${time}</div>
       <div class="bar ${barClass}"></div>
       <div class="body">
@@ -101,6 +101,18 @@ function empty(glyph, title, text) {
 // ---------- render ----------
 // ---------- calendar ----------
 const CHIP_MAX = 3; // 1 日のマスに並べる予定の数（残りは「他N件」）
+const HOUR_PX = 40; // 時間軸の 1 時間の高さ
+// 連絡元（色は style.css の .app-*）
+const APPS = { discord: "Discord", slack: "Slack", teams: "Teams", zoom: "Zoom", line: "LINE", manual: "手動", other: "その他" };
+
+function appOf(ev) {
+  if (ev.source === "manual") return "manual";
+  if (ev.source !== "other" && APPS[ev.source]) return ev.source; // Discord Bot など
+  // Windows 通知は source_channel が「Discord サーバー #ch」「Slack: タイトル」の形
+  const head = String(ev.source_channel || "").split(":")[0].toLowerCase();
+  for (const key of ["discord", "slack", "teams", "zoom"]) if (head.includes(key)) return key;
+  return /\bline\b/.test(head) ? "line" : "other";
+}
 
 function monthOf(iso) {
   const d = parseDate(iso);
@@ -131,61 +143,229 @@ function moveMonth(dir) {
   selectDay(monthOf(today) === next ? today : next);
 }
 
-function calendarChip(ev) {
-  const time = ev.all_day ? "" : `<span class="chip-time">${esc(ev.start_time)}</span>`;
-  return `<span class="chip ${ev.all_day ? "allday" : ""}">${time}<span class="chip-title">${esc(ev.title)}</span></span>`;
+async function holidaysFor(from, to) {
+  const key = `${from}/${to}`;
+  if (!state.holidays.has(key)) {
+    try {
+      const list = await api(`/api/holidays?date_from=${from}&date_to=${to}`);
+      state.holidays.set(key, new Map(list.map((h) => [h.date, h.name])));
+    } catch (_) {
+      return new Map(); // 祝日が取れなくてもカレンダーは出す（アプリの再起動前など）
+    }
+  }
+  return state.holidays.get(key);
 }
 
-async function renderEvents() {
-  const today = todayIso();
-  const cal = state.cal;
-  if (!cal.selected) selectDay(today);
-  const { first, start, end, weeks } = calendarRange(cal.month);
-  const selected = cal.selected;
-  const events = await api(`/api/events?date_from=${toIso(start)}&date_to=${toIso(end)}`);
+function groupByDate(events) {
   const byDate = new Map();
   for (const ev of events) {
     if (!byDate.has(ev.date)) byDate.set(ev.date, []);
     byDate.get(ev.date).push(ev);
   }
+  return byDate;
+}
+
+const toMin = (hhmm) => { const [h, m] = hhmm.split(":").map(Number); return h * 60 + m; };
+const nowMinutes = (now) => now.getHours() * 60 + now.getMinutes();
+
+// 時刻のある予定の [開始, 終了]（分）。終了がなければ 1 時間とみなす
+function span(ev) {
+  const s = toMin(ev.start_time);
+  let e = ev.end_time ? toMin(ev.end_time) : s + 60;
+  if (e <= s) e = s + 30;
+  return [s, Math.min(e, 24 * 60)];
+}
+
+function timeText(ev) {
+  return ev.all_day ? "終日" : esc(ev.time_range || ev.start_time);
+}
+
+function tooltip(ev) {
+  return [ev.title, ev.all_day ? "終日" : ev.time_range || ev.start_time, ev.location, APPS[appOf(ev)]].filter(Boolean).join("\n");
+}
+
+function deleteButton(ev) {
+  return `<button class="icon-button delete" data-delete="${ev.id}" aria-label="「${esc(ev.title)}」を削除" title="削除">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>`;
+}
+
+function calendarChip(ev) {
+  const time = ev.all_day ? "" : `<span class="chip-time">${esc(ev.start_time)}</span>`;
+  return `<span class="chip app-${appOf(ev)}${ev.all_day ? " allday" : ""}">${time}<span class="chip-title">${esc(ev.title)}</span></span>`;
+}
+
+// 次の予定（今日のまだ終わっていない時刻のある予定 → 明日以降の予定。今日の終日の予定は下の「今日」に出る）
+function nextEvent(upcoming, today, now) {
+  const nowMin = nowMinutes(now);
+  return upcoming.find((ev) => ev.date > today || (ev.date === today && !ev.all_day && span(ev)[1] > nowMin));
+}
+
+function untilLabel(ev, today, now) {
+  const days = Math.round((parseDate(ev.date) - parseDate(today)) / 86400000);
+  if (days > 0) return { 1: "明日", 2: "明後日" }[days] || `${days}日後`;
+  if (ev.all_day) return "今日";
+  const diff = span(ev)[0] - nowMinutes(now);
+  if (diff <= 0) return "開催中";
+  if (diff < 60) return `あと${diff}分`;
+  return `あと${Math.floor(diff / 60)}時間${diff % 60 ? `${diff % 60}分` : ""}`;
+}
+
+function nextUpCard(ev, today, now) {
+  if (!ev) return `<div class="group next-up app-other"><span class="next-label">次の予定</span><span class="secondary">今後の予定はありません</span></div>`;
+  const app = appOf(ev);
+  const meta = [ev.location && esc(ev.location), APPS[app]].filter(Boolean).join(" ・ ");
+  return `
+    <button class="group next-up app-${app}" data-day="${ev.date}" title="この日を表示">
+      <span class="next-label">次の予定<span class="until">${untilLabel(ev, today, now)}</span></span>
+      <span class="next-title">${esc(ev.title)}</span>
+      <span class="next-when">${dateLabel(ev.date)} ${timeText(ev)}</span>
+      ${meta ? `<span class="next-meta">${meta}</span>` : ""}
+    </button>`;
+}
+
+// 重なる予定を横に並べる（重なりのかたまりごとに列を割り当てる）
+function layoutColumns(items) {
+  const sorted = [...items].sort((a, b) => a.s - b.s || b.e - a.e);
+  const out = [];
+  let group = [];
+  let groupEnd = -1;
+  const flush = () => {
+    const colEnds = [];
+    for (const it of group) {
+      let c = colEnds.findIndex((end) => end <= it.s);
+      if (c < 0) c = colEnds.push(0) - 1;
+      colEnds[c] = it.e;
+      it.col = c;
+    }
+    for (const it of group) it.cols = colEnds.length;
+    out.push(...group);
+    group = [];
+  };
+  for (const it of sorted) {
+    if (group.length && it.s >= groupEnd) flush();
+    groupEnd = group.length ? Math.max(groupEnd, it.e) : it.e;
+    group.push(it);
+  }
+  if (group.length) flush();
+  return out;
+}
+
+function timeline(list, now) {
+  const items = list.map((ev) => { const [s, e] = span(ev); return { ev, s, e }; });
+  const startH = Math.min(8, Math.floor(Math.min(...items.map((i) => i.s)) / 60));
+  const endH = Math.max(20, Math.ceil(Math.max(...items.map((i) => i.e)) / 60));
+  const y = (min) => ((min - startH * 60) * HOUR_PX) / 60;
+  let hours = "";
+  for (let h = startH; h <= endH; h++) hours += `<div class="hour" style="top:${(h - startH) * HOUR_PX}px"><span>${h}:00</span></div>`;
+  const blocks = layoutColumns(items).map(({ ev, s, e, col, cols }) => {
+    const short = e - s < 45; // 1 行（開始時刻＋タイトル）
+    const meta = e - s >= 90 && cols === 1 ? sourceMeta(ev) : ""; // 場所・連絡元は入りきるときだけ
+    return `
+      <div class="tl-event app-${appOf(ev)}${short ? " short" : ""}" title="${esc(tooltip(ev))}"
+        style="top:${y(s) + 1}px;height:${Math.max(y(e) - y(s) - 2, 18)}px;left:calc(${(col * 100) / cols}% + 1px);width:calc(${100 / cols}% - 2px)">
+        <span class="tl-time">${short ? esc(ev.start_time) : timeText(ev)}</span>
+        <span class="tl-title">${esc(ev.title)}</span>
+        ${meta ? `<span class="tl-meta">${meta}</span>` : ""}
+        ${deleteButton(ev)}
+      </div>`;
+  }).join("");
+  const nowMin = now ? nowMinutes(now) : -1;
+  const nowLine = nowMin >= startH * 60 && nowMin <= endH * 60 ? `<div class="now-line" style="top:${y(nowMin)}px"></div>` : "";
+  return `<div class="timeline"><div class="tl-grid" style="height:${(endH - startH) * HOUR_PX}px">${hours}<div class="tl-events">${blocks}</div>${nowLine}</div></div>`;
+}
+
+function dayHeading(iso, today, holiday) {
+  const rel = relativeDay(iso, today);
+  return `<strong class="${rel === "今日" ? "today" : ""}">${dateLabel(iso)}</strong>
+    <span class="sub">${rel ? `<span>${rel}</span>` : ""}${holiday ? `<span class="holiday-name">${esc(holiday)}</span>` : ""}</span>`;
+}
+
+function dayPanel(iso, list, today, holiday, now) {
+  const allDay = list.filter((ev) => ev.all_day);
+  const timed = list.filter((ev) => !ev.all_day);
+  let body = "";
+  if (allDay.length) {
+    body += `<div class="allday-row"><span class="allday-label">終日</span><div class="allday-list">${allDay.map((ev) => `
+      <div class="allday-pill app-${appOf(ev)}" title="${esc(tooltip(ev))}"><span class="pill-title">${esc(ev.title)}</span>${deleteButton(ev)}</div>`).join("")}
+    </div></div>`;
+  }
+  if (timed.length) body += timeline(timed, iso === today ? now : null);
+  if (!list.length) body += `<div class="row secondary">予定はありません</div>`;
+  return `<section class="group day-panel"><div class="day-panel-header">${dayHeading(iso, today, holiday)}</div>${body}</section>`;
+}
+
+async function renderEvents() {
+  const today = todayIso();
+  const now = new Date();
+  const cal = state.cal;
+  if (!cal.selected) selectDay(today);
+  const { first, start, end, weeks } = calendarRange(cal.month);
+  const selected = cal.selected;
+  const from = toIso(start);
+  const to = toIso(end);
+  const [events, holidays, upcoming] = await Promise.all([
+    api(`/api/events?date_from=${from}&date_to=${to}`),
+    holidaysFor(from, to),
+    api("/api/events"),
+  ]);
+  const byDate = groupByDate(events);
 
   let cells = "";
   for (let i = 0; i < weeks * 7; i++) {
     const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
     const iso = toIso(d);
     const list = byDate.get(iso) || [];
+    const holiday = holidays.get(iso);
     const cls = ["day"];
     if (d.getMonth() !== first.getMonth()) cls.push("outside");
-    if (d.getDay() === 0 || d.getDay() === 6) cls.push("weekend");
+    if (d.getDay() === 0) cls.push("sun");
+    if (d.getDay() === 6) cls.push("sat");
+    if (holiday) cls.push("holiday");
     if (iso === today) cls.push("today");
     if (iso === selected) cls.push("selected");
     const more = list.length - CHIP_MAX;
+    const label = [dateLabel(iso), holiday, iso === today && "今日", list.length && `予定${list.length}件`].filter(Boolean).join(" ");
     cells += `
-      <button class="${cls.join(" ")}" data-day="${iso}" aria-pressed="${iso === selected}"
-        aria-label="${dateLabel(iso)}${iso === today ? " 今日" : ""}${list.length ? ` 予定${list.length}件` : ""}">
+      <button class="${cls.join(" ")}" data-day="${iso}" aria-pressed="${iso === selected}" aria-label="${esc(label)}">
         <span class="num">${d.getDate()}</span>
-        <span class="chips">${list.slice(0, CHIP_MAX).map(calendarChip).join("")}${more > 0 ? `<span class="more">他${more}件</span>` : ""}</span>
-        <span class="dots">${list.slice(0, 3).map((ev) => `<i class="${ev.all_day ? "allday" : ""}"></i>`).join("")}</span>
+        <span class="chips">${holiday ? `<span class="holiday-label">${esc(holiday)}</span>` : ""}${list.slice(0, CHIP_MAX).map(calendarChip).join("")}${more > 0 ? `<span class="more">他${more}件</span>` : ""}</span>
+        <span class="dots">${list.slice(0, 3).map((ev) => `<i class="app-${appOf(ev)}"></i>`).join("")}</span>
       </button>`;
   }
 
+  const apps = new Set(events.map(appOf));
+  const legend = apps.size
+    ? `<div class="legend">${Object.keys(APPS).filter((a) => apps.has(a)).map((a) => `<span class="app-${a}"><i></i>${APPS[a]}</span>`).join("")}</div>`
+    : "";
   const dayEvents = byDate.get(selected) || [];
-  const rel = relativeDay(selected, today);
+  const holiday = holidays.get(selected);
+
   return `
-    <div class="cal-header">
-      <h2 class="cal-title">${first.getFullYear()}年${first.getMonth() + 1}月</h2>
-      <div class="cal-nav">
-        <button class="icon-button" data-cal-nav="prev" aria-label="前の月" title="前の月"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
-        <button class="text-button" data-cal-nav="today">今日</button>
-        <button class="icon-button" data-cal-nav="next" aria-label="次の月" title="次の月"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
-      </div>
-    </div>
-    <div class="group calendar">
-      <div class="weekdays" aria-hidden="true">${WEEKDAYS.map((w) => `<span>${w}</span>`).join("")}</div>
-      <div class="days">${cells}</div>
-    </div>
-    <div class="section-header"><strong class="${rel === "今日" ? "today" : ""}">${dateLabel(selected)}</strong><span>${rel}</span></div>
-    <div class="group">${dayEvents.length ? dayEvents.map((ev) => eventRow(ev)).join("") : `<div class="row secondary">予定はありません</div>`}</div>`;
+    <div class="cal-layout">
+      <section class="cal-main">
+        <div class="cal-header">
+          <h2 class="cal-title">${first.getFullYear()}年${first.getMonth() + 1}月</h2>
+          <div class="cal-nav">
+            <button class="icon-button" data-cal-nav="prev" aria-label="前の月" title="前の月"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button>
+            <button class="text-button" data-cal-nav="today">今日</button>
+            <button class="icon-button" data-cal-nav="next" aria-label="次の月" title="次の月"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg></button>
+          </div>
+        </div>
+        <div class="group calendar">
+          <div class="weekdays" aria-hidden="true">${WEEKDAYS.map((w) => `<span>${w}</span>`).join("")}</div>
+          <div class="days">${cells}</div>
+        </div>
+        ${legend}
+        <div class="day-list">
+          <div class="section-header">${dayHeading(selected, today, holiday)}</div>
+          <div class="group">${dayEvents.length ? dayEvents.map((ev) => eventRow(ev)).join("") : `<div class="row secondary">予定はありません</div>`}</div>
+        </div>
+      </section>
+      <aside class="cal-side">
+        ${nextUpCard(nextEvent(upcoming, today, now), today, now)}
+        ${dayPanel(selected, dayEvents, today, holiday, now)}
+      </aside>
+    </div>`;
 }
 
 function changeCard({ kind, change, event, after, conflicts }) {
@@ -360,11 +540,12 @@ document.addEventListener("click", async (e) => {
     if (t.dataset.tab) {
       $$(".navbar .segment").forEach((b) => b.classList.toggle("active", b === t));
       state.tab = t.dataset.tab;
+      document.body.dataset.tab = state.tab;
       await render(true);
     } else if (t.dataset.day) {
       selectDay(t.dataset.day);
       await render(true);
-      $(`[data-day="${t.dataset.day}"]`)?.focus();
+      $(`.calendar [data-day="${t.dataset.day}"]`)?.focus();
     } else if (t.dataset.calNav) {
       moveMonth(t.dataset.calNav);
       await render(true);
@@ -507,6 +688,7 @@ $("#manual-form").addEventListener("submit", async (e) => {
 // ---------- init ----------
 (function init() {
   const now = new Date();
+  document.body.dataset.tab = state.tab;
   $("#today-label").textContent = `${now.getMonth() + 1}月${now.getDate()}日 ${WEEKDAYS[now.getDay()]}曜日`;
   refreshStatus().then(() => render(true));
   setInterval(() => { refreshStatus(); if ($("#sheet").hidden) render(); }, 5000);
