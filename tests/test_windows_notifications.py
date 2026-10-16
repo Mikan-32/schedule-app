@@ -18,6 +18,7 @@ from app.connectors.windows_notifications import (
     filetime_to_datetime,
     parse_discord_title,
     parse_toast_xml,
+    strip_invisible,
 )
 
 DISCORD_XML = """<toast launch="discord://"><visual><binding template="ToastGeneric">
@@ -37,6 +38,11 @@ def test_parse_toast_xml():
 def test_parse_discord_title():
     assert parse_discord_title("山田 (#連絡, 研究室)") == ("山田", "研究室 #連絡")
     assert parse_discord_title("佐藤") == ("佐藤", "DM")
+    # 名前・チャンネル・サーバーが見えない制御文字で囲まれ、名前に括弧が入っていてもサーバーのメッセージと分かる
+    title = "\u2068naokirodion (石原直樹, 永遠の厨二) 主催者\u2069 (\u2068#group-ishihara\u2069, \u2068[private] alpha-2026\u2069)"
+    assert parse_discord_title(title) == ("naokirodion (石原直樹, 永遠の厨二) 主催者", "[private] alpha-2026 #group-ishihara")
+    assert parse_discord_title("\u2068低音\u2069") == ("低音", "DM")
+    assert strip_invisible("\u2068@students-2026\u2069 明日\u200b") == "@students-2026 明日"
 
 
 def test_filetime():

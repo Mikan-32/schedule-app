@@ -82,14 +82,23 @@ def filetime_to_datetime(value: int) -> datetime:
 
 
 _DISCORD_TITLE = re.compile(r"^(?P<author>.+?) \((?P<channel>#[^,]+), (?P<server>.+)\)$")
+# 見えない制御文字（双方向テキストの分離・ゼロ幅文字など）。Discord は名前やチャンネル名を U+2068…U+2069 で囲んで通知する
+_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
+
+
+def strip_invisible(text: str) -> str:
+    return _INVISIBLE.sub("", text or "")
 
 
 def parse_discord_title(title: str) -> tuple[str, str]:
-    """Discord の通知タイトル「ユーザー名 (#チャンネル, サーバー名)」を (送信者, チャンネル) に分解する。"""
-    m = _DISCORD_TITLE.match(title.strip())
+    """Discord の通知タイトル「ユーザー名 (#チャンネル, サーバー名)」を (送信者, チャンネル) に分解する。
+
+    サーバーのチャンネル以外（チャンネルが付いていないもの）は DM とみなす。
+    """
+    m = _DISCORD_TITLE.match(strip_invisible(title).strip())
     if m:
         return m["author"], f"{m['server']} {m['channel']}"
-    return title.strip(), "DM"
+    return strip_invisible(title).strip(), "DM"
 
 
 def match_app(toast: ToastNotification, targets: list[str]) -> Optional[str]:
@@ -102,7 +111,7 @@ def match_app(toast: ToastNotification, targets: list[str]) -> Optional[str]:
 
 
 def to_incoming(toast: ToastNotification, app_label: str) -> IncomingMessage:
-    title, body = toast.title, toast.body
+    title, body = strip_invisible(toast.title), strip_invisible(toast.body)
     if app_label.lower() == "discord":
         author, channel = parse_discord_title(title)
         channel = f"Discord {channel}"
