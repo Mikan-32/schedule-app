@@ -269,7 +269,8 @@ class OllamaClient:
         user_msg: dict = {
             "role": "user",
             "content": build_user_prompt(
-                text, sent_at, author, channel, len(images), existing, context, reply_to, self.settings.my_names
+                text, sent_at, author, channel, len(images), existing, context, reply_to,
+                self.settings.my_names, self.settings.my_groups,
             ),
         }
         if images:

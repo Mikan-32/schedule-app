@@ -142,7 +142,7 @@ class Event:
     end_time: Optional[time] = None
     location: str = ""
     description: str = ""
-    status: str = "confirmed"  # confirmed / pending / rejected / cancelled / merged / skipped（他の人の予定として見送り）
+    status: str = "confirmed"  # confirmed / pending / rejected / cancelled / merged / skipped（宛先の基準で見送り）
     source: str = "manual"
     source_message_id: str = ""
     source_author: str = ""
@@ -155,12 +155,16 @@ class Event:
     updated_at: Optional[datetime] = None
     gcal_event_id: Optional[str] = None  # Google カレンダー側のイベントID（同期済みなら）
     gcal_hash: Optional[str] = None  # 最後に同期した内容のハッシュ
+    audience: str = ""  # 誰宛てか（me / all / unknown / others。手動で追加した予定などは ""）
+    audience_reason: str = ""  # その根拠（「名前「遥陽」が出てくる」など）
+    held: bool = False  # 宛先の基準で確認待ちに入れた
 
     @property
     def all_day(self) -> bool:
         return self.start_time is None
 
     def to_dict(self) -> dict:
+        from .audience import AUDIENCE_LABELS
         from .formatting import format_event_line, format_time_range
 
         return {
@@ -182,6 +186,10 @@ class Event:
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "gcal_synced": bool(self.gcal_event_id),
+            "audience": self.audience,
+            "audience_label": AUDIENCE_LABELS.get(self.audience, ""),
+            "audience_reason": self.audience_reason,
+            "held": self.held,
             "label": format_event_line(self),
             "time_range": format_time_range(self),
         }

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Optional, Protocol
 
+from .audience import AUDIENCE_LABELS
 from .db import Database
 from datetime import date
 
@@ -33,6 +34,12 @@ class NotificationSink(Protocol):
     # 以下は任意（実装していないシンクには送らない）
     # async def notify_changed(self, change: EventChange, event: Event, message: str) -> None: ...
     # async def notify_change_pending(self, change: EventChange, event: Event, message: str) -> None: ...
+    # async def notify_held(self, event: Event, message: str) -> None: ...
+
+
+def _who(event: Event) -> str:
+    who = " ・ ".join(x for x in (event.source_channel, event.source_author) if x)
+    return f"（{who}）" if who else ""
 
 
 def _before_event(change: EventChange, current: Event | None) -> Event:
@@ -131,10 +138,18 @@ class Notifier:
             Notification(kind="resolved", message=message, event_id=change.event_id, change_id=change.id)
         )
 
+    async def held(self, event: Event) -> Notification:
+        """登録の基準で確認待ちに入れたとき（全員・グループ宛て、誰宛てか分からない など）。"""
+        label = AUDIENCE_LABELS.get(event.audience, "")
+        message = f"追加するか確認してください{f'（{label}）' if label else ''}: {format_event_line(event)}" + _who(event)
+        n = self._record(Notification(kind="held", message=message, event_id=event.id))
+        await self._each("notify_held", event, message)
+        return n
+
     async def skipped(self, event: Event) -> Notification:
-        """他の人の予定として見送ったとき（Web UI のみ。「追加する」で登録できる）。"""
-        who = " ・ ".join(x for x in (event.source_channel, event.source_author) if x)
-        message = f"他の人の予定として見送りました: {format_event_line(event)}" + (f"（{who}）" if who else "")
+        """登録の基準で見送ったとき（Web UI のみ。「自分の予定として追加する」で登録できる）。"""
+        what = "他の人の予定" if event.audience in ("others", "") else f"{AUDIENCE_LABELS.get(event.audience, '')}の予定"
+        message = f"{what}として見送りました: {format_event_line(event)}" + _who(event)
         return self._record(Notification(kind="skipped", message=message, event_id=event.id))
 
     async def merged_into(self, event: Event) -> Notification:

@@ -114,7 +114,19 @@ class Settings:
     # 同じチャンネル（DM は相手ごと）の直前のメッセージを、何件・何分前までLLM に参考として渡すか
     context_messages: int = field(default_factory=lambda: _int("CONTEXT_MESSAGES", 8))
     context_minutes: int = field(default_factory=lambda: _int("CONTEXT_MINUTES", 180))
-    # はっきり他の人だけの予定だと判断したとき: skip（登録せず通知に残す）/ add（区別せず登録）
+    # あなたが所属しているグループ・ロール・チーム（@students-2026 など。カンマ区切り）。ここ宛ての連絡は「全員・グループ宛て」
+    my_groups: list[str] = field(
+        default_factory=lambda: [n.strip() for n in os.getenv("MY_GROUPS", "").split(",") if n.strip()]
+    )
+    # 宛先ごとの扱い: add（登録）/ confirm（確認待ちに入れる）/ skip（登録せず通知に残す。あとから追加できる）
+    # Web UI の「登録の基準」で変えると、そちらが優先される（data/schedule.db に保存）
+    # 自分宛て: DM・自分の名前が出てくる・自分の発言・自分で貼り付けたメッセージ
+    audience_me: str = field(default_factory=lambda: os.getenv("AUDIENCE_ME", "add").strip().lower())
+    # 全員・グループ宛て: @everyone・@here・所属グループへのメンション、「皆さん」など全体への連絡
+    audience_all: str = field(default_factory=lambda: os.getenv("AUDIENCE_ALL", "confirm").strip().lower())
+    # 誰宛てか分からない: 名前も所属グループも出てこない
+    audience_unknown: str = field(default_factory=lambda: os.getenv("AUDIENCE_UNKNOWN", "confirm").strip().lower())
+    # 他の人宛て: はっきり他の人（他のグループ）だけの予定
     others_mode: str = field(default_factory=lambda: os.getenv("OTHERS_MODE", "skip").strip().lower())
 
     # --- 取りこぼし対策 ---

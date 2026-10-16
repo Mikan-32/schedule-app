@@ -10,6 +10,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
+from ..audience import ACTIONS, AUDIENCE_LABELS
 from ..gcal import GoogleAuthError
 from ..holidays import holidays_between
 from ..llm import LLMUnavailable
@@ -199,6 +200,31 @@ async def undo_change(request: Request, change_id: int):
         raise HTTPException(404, "予定が見つかりません")
     except ValueError as e:
         raise HTTPException(409, str(e))
+
+
+class AudienceRulesIn(BaseModel):
+    names: Optional[list[str]] = None
+    groups: Optional[list[str]] = None
+    actions: Optional[dict[str, str]] = None
+
+
+def _rules_response(rules) -> dict:
+    return {**rules.to_dict(), "labels": AUDIENCE_LABELS}
+
+
+@router.get("/settings/audience")
+async def get_audience_rules(request: Request):
+    """登録の基準（自分の名前・所属グループ・宛先ごとの扱い）。"""
+    return _rules_response(_ctx(request).service.audience_rules())
+
+
+@router.put("/settings/audience")
+async def put_audience_rules(request: Request, body: AudienceRulesIn):
+    data = body.model_dump(exclude_none=True)
+    for key, value in (data.get("actions") or {}).items():
+        if key not in AUDIENCE_LABELS or value not in ACTIONS:
+            raise HTTPException(400, f"扱いは {' / '.join(ACTIONS)} のどれかにしてください: {key}={value}")
+    return _rules_response(_ctx(request).service.save_audience_rules(data))
 
 
 @router.get("/notifications")

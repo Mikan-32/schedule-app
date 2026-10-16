@@ -393,20 +393,30 @@ function changeCard({ kind, change, event, after, conflicts }) {
 
 async function renderPending() {
   const items = await api("/api/pending");
-  if (!items.length) return empty("✓", "確認待ちはありません", "予定が重なったときや、予定の変更・取り消しがあいまいなときに、ここで選べます");
+  if (!items.length) return empty("✓", "確認待ちはありません", "予定が重なったとき、自分宛てか分からない予定が届いたとき、予定の変更・取り消しがあいまいなときに、ここで選べます");
   return items.map((item) => item.kind === "update" || item.kind === "cancel" ? changeCard(item) : addCard(item)).join("");
 }
 
 function addCard({ event, conflicts, merge_into: mergeInto, likely_same: likelySame }) {
+  // held: 登録の基準（全員・グループ宛て、誰宛てか分からない など）で確認待ちに入れた予定
   const heading = likelySame
     ? `${dateLabel(event.date)}に同じ予定があるかもしれません`
-    : `${dateLabel(event.date)}は既に予定があります`;
+    : conflicts.length || !event.held
+      ? `${dateLabel(event.date)}は既に予定があります`
+      : `${dateLabel(event.date)} ・ ${esc(event.audience_label || "確認が必要な予定")}`;
+  const reason = event.held && event.audience_reason ? `<div class="reason">理由: ${esc(event.audience_reason)}</div>` : "";
+  const existing = conflicts.length || !event.held
+    ? `<div class="label-small">既存の予定</div>
+      ${conflicts.map((c) => eventRow(c, { deletable: false })).join("") || `<div class="row secondary">（既存の予定は削除されました）</div>`}`
+    : "";
+  const source = event.source_url ? ` <a href="${esc(event.source_url)}" target="_blank" rel="noopener">元メッセージ</a>` : "";
   return `
     <div class="group pending-card">
       <div class="heading">${heading}</div>
+      ${reason}
       ${eventRow(event, { deletable: false })}
-      <div class="label-small">既存の予定</div>
-      ${conflicts.map((c) => eventRow(c, { deletable: false })).join("") || `<div class="row secondary">（既存の予定は削除されました）</div>`}
+      ${existing}
+      ${event.held && event.raw_text ? `<div class="quote">${esc(event.raw_text)}${source}</div>` : ""}
       <div class="actions">
         <button class="secondary-button" data-reject="${event.id}">追加しない</button>
         ${mergeInto ? `<button class="secondary-button" data-merge="${event.id}" data-merge-into="${mergeInto}"
@@ -647,7 +657,11 @@ function closeSheet() {
 $("#open-sheet").addEventListener("click", () => openSheet());
 $("#close-sheet").addEventListener("click", closeSheet);
 $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#sheet").hidden) closeSheet(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (!$("#settings-sheet").hidden) closeSettings();
+  else if (!$("#sheet").hidden) closeSheet();
+});
 
 $$("#sheet-tabs .segment").forEach((btn) => btn.addEventListener("click", (e) => {
   e.preventDefault();
@@ -811,6 +825,7 @@ $("#analyze-form").addEventListener("submit", async (e) => {
 // どの画面でも Ctrl+V で画像を貼り付けたら、解析シートを開いて追加する
 const isEditable = (el) => !!el?.closest?.("input, textarea, select, [contenteditable]");
 document.addEventListener("paste", (e) => {
+  if (!$("#settings-sheet").hidden) return; // 登録の基準を編集中は、解析シートを開かない
   const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith("image/"));
   if (files.length) {
     e.preventDefault();
@@ -875,6 +890,70 @@ $("#manual-form").addEventListener("submit", async (e) => {
     e.target.reset();
     closeSheet();
     await Promise.all([render(), refreshStatus()]);
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+// ---------- 登録の基準（名前・所属グループ・宛先ごとの扱い） ----------
+const RULE_HINTS = {
+  me: "DM・名前が出てくる・自分の発言や貼り付け",
+  all: "@everyone・@here・所属グループ宛て",
+  unknown: "名前も所属グループも出てこない",
+  others: "他の人の名前・他のグループだけ",
+};
+const RULE_ACTIONS = [["add", "登録"], ["confirm", "確認"], ["skip", "見送り"]];
+const rules = { actions: {}, labels: {} };
+
+function renderRuleRows() {
+  $("#audience-actions").innerHTML = Object.keys(RULE_HINTS).map((key) => `
+    <div class="row rule-row">
+      <div class="body"><div class="title">${esc(rules.labels[key] || key)}</div><div class="meta">${esc(RULE_HINTS[key])}</div></div>
+      <div class="segmented mini" role="radiogroup" aria-label="${esc(rules.labels[key] || key)}">
+        ${RULE_ACTIONS.map(([action, label]) => {
+          const on = rules.actions[key] === action;
+          return `<button type="button" role="radio" aria-checked="${on}" class="segment${on ? " active" : ""}" data-rule="${key}" data-rule-action="${action}">${label}</button>`;
+        }).join("")}
+      </div>
+    </div>`).join("");
+}
+
+async function openSettings() {
+  try {
+    const r = await api("/api/settings/audience");
+    Object.assign(rules, { actions: { ...r.actions }, labels: r.labels });
+    const form = $("#settings-form");
+    form.elements.names.value = r.names.join(", ");
+    form.elements.groups.value = r.groups.join(", ");
+    renderRuleRows();
+    $("#settings-sheet").hidden = false;
+  } catch (err) {
+    toast(err.message);
+  }
+}
+function closeSettings() { $("#settings-sheet").hidden = true; }
+const splitList = (value) => value.split(/[,、，\n]/).map((s) => s.trim()).filter(Boolean);
+
+$("#open-settings").addEventListener("click", openSettings);
+$("#close-settings").addEventListener("click", closeSettings);
+$("#settings-sheet").addEventListener("click", (e) => {
+  if (e.target.id === "settings-sheet") { closeSettings(); return; }
+  const b = e.target.closest("[data-rule]");
+  if (!b) return;
+  rules.actions[b.dataset.rule] = b.dataset.ruleAction;
+  renderRuleRows();
+});
+$("#settings-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    await api("/api/settings/audience", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names: splitList(form.elements.names.value), groups: splitList(form.elements.groups.value), actions: rules.actions }),
+    });
+    toast("登録の基準を保存しました");
+    closeSettings();
   } catch (err) {
     toast(err.message);
   }

@@ -30,8 +30,9 @@ SYSTEM_PROMPT = """あなたはチャットメッセージ（と添付画像）�
 
 # 誰の予定か（audience）
 - me: 【利用者】本人が参加・対応する予定。利用者とのDM、利用者の名前へのメンション・呼びかけ、利用者自身の発言など。
-- all: グループ・チャンネル全員向けの予定。「皆さん」「全員」「各自」「@everyone」「@here」、全体への連絡など。
-- others: 利用者以外の特定の人だけの予定。「田中さんは15日に面談です」のように、利用者の名前が出てこない個人宛ての予定。
+- all: グループ・チャンネル全員向けの予定。「皆さん」「全員」「各自」「@everyone」「@here」、【所属グループ】へのメンション、全体への連絡など。
+- others: 利用者以外の特定の人だけの予定。「田中さんは15日に面談です」のように、利用者の名前が出てこない個人宛ての予定や、
+  【所属グループ】以外のグループ・ロールだけに宛てた予定。
 - unknown: どちらとも判断できない。迷ったら unknown にする（others にするのは、はっきり他の人だけの予定のときに限る）。
 
 # 新しい予定か、登録済みの予定の変更・取り消しか（action）
@@ -123,11 +124,16 @@ def build_user_prompt(
     context: Optional[list[ContextMessage]] = None,
     reply_to: str = "",
     my_names: Optional[list[str]] = None,
+    my_groups: Optional[list[str]] = None,
 ) -> str:
     base = f"{sent_at.strftime('%Y-%m-%d')}({WEEKDAYS_JA[sent_at.weekday()]}) {sent_at.strftime('%H:%M')}"
     names = " / ".join(my_names or [])
     parts = [
         f"【利用者】{names}（この名前へのメンション「@名前」や呼びかけは利用者宛て）" if names else "【利用者】（名前は未設定）",
+    ]
+    if my_groups:
+        parts.append(f"【所属グループ】{' / '.join(my_groups)}（利用者が所属するグループ・ロール。ここへのメンションは all）")
+    parts += [
         f"【基準日時】{base}（メッセージ送信日時, {sent_at.tzname() or ''}）",
     ]
     if author:

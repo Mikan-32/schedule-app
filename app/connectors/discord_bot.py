@@ -3,6 +3,7 @@
 - Bot が参加しているサーバーのチャンネル（DISCORD_WATCH_CHANNEL_IDS で絞り込み可）と、
   オーナーから Bot への DM（転送メッセージ含む）を精査する
 - 予定追加・重複確認の通知はオーナーに DM で送る。重複時は「追加する / 追加しない」ボタン付き
+  （登録の基準で確認待ちにした予定（全員・グループ宛て、誰宛てか分からない など）も同じボタン付き）
 - 予定の変更・取り消しも DM で通知する。自動で反映したものは「元に戻す」、あいまいなものは「変更する / 変更しない」ボタン付き
 """
 from __future__ import annotations
@@ -327,6 +328,17 @@ class DiscordConnector(Connector):
         first, *rest = message.split("\n")
         body = f"**確認: {first}**\n" + "\n".join(rest) + f"\n{self._details(event)}"
         await owner.send(body, view=view)
+
+    async def notify_held(self, event: Event, message: str) -> None:
+        """登録の基準で確認待ちに入れた予定（全員・グループ宛て、誰宛てか分からない など）。"""
+        owner = await self._owner()
+        if not owner:
+            return
+        view = discord.ui.View(timeout=None)
+        view.add_item(ConflictButton("confirm", event.id))
+        view.add_item(ConflictButton("reject", event.id))
+        reason = f"\n理由: {event.audience_reason}" if event.audience_reason else ""
+        await owner.send(f"**確認: {message}**{reason}\n{self._details(event)}", view=view)
 
     async def notify_changed(self, change: EventChange, event: Event, message: str) -> None:
         owner = await self._owner()

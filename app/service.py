@@ -10,6 +10,8 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from typing import Optional, Protocol
 
+from .audience import AudienceRules, judge, load_saved
+from .audience import save as save_audience_rules
 from .config import Settings
 from .db import Database
 from .llm import LLMUnavailable
@@ -189,6 +191,7 @@ class ScheduleService:
         self._queue_lock = asyncio.Lock()
         self.processing: Optional[tuple[str, str]] = None  # 再精査キューで精査中のメッセージ (source, message_id)
         self._paste_results: dict[str, dict] = {}  # 貼り付けたメッセージの精査結果（ジョブID → 結果）
+        load_saved(db, settings)  # Web UI で保存した登録の基準（名前・所属グループ・宛先ごとの扱い）
 
     def today(self) -> date:
         return datetime.now(self.settings.tz).date()
@@ -251,7 +254,7 @@ class ScheduleService:
             self.db.enqueue_message(msg, str(e) or type(e).__name__, count_attempt=not isinstance(e, LLMUnavailable))
             log.warning("ローカルLLM で精査できなかったため、あとで再精査します: %s", e)
             return AnalysisOutcome(skipped="ローカルLLM で精査できなかったため、つながったら自動でやり直します", queued=True)
-        return await self._apply_result(result, msg, candidates)
+        return await self._apply_result(result, msg, candidates, context)
 
     def _context(self, msg: IncomingMessage) -> list[ContextMessage]:
         """同じ会話（チャンネル・DM の相手）の直前のメッセージ。"""
@@ -286,7 +289,13 @@ class ScheduleService:
             reply_to=msg.reply_to,
         )
 
-    async def _apply_result(self, result: ExtractionResult, msg: IncomingMessage, candidates: list[Event]) -> AnalysisOutcome:
+    async def _apply_result(
+        self,
+        result: ExtractionResult,
+        msg: IncomingMessage,
+        candidates: list[Event],
+        context: Optional[list[ContextMessage]] = None,
+    ) -> AnalysisOutcome:
         outcome = AnalysisOutcome()
         notes: list[str] = []
         for raw in result.events:
@@ -295,15 +304,10 @@ class ScheduleService:
                 if note:
                     notes.append(note)
             elif raw.action == "same":
-                res = await self.handle_same(raw, msg, candidates)
+                res = await self.handle_same(raw, msg, candidates, context)
             else:
                 event = self.validate(raw, msg)
-                if event is None:
-                    res = None
-                elif raw.audience == "others" and self.settings.others_mode == "skip":
-                    res = await self.skip_for_others(event)  # はっきり他の人だけの予定 → 登録せず通知に残す
-                else:
-                    res = await self.add_event(event)
+                res = await self.add_by_audience(event, raw, msg, context) if event else None
             if res:
                 outcome.results.append(res)
         if not outcome.results:
@@ -335,8 +339,9 @@ class ScheduleService:
     async def _process_queued(self, qid: int, msg: IncomingMessage) -> str:
         """キューのメッセージを 1 件精査する。done / failed / unavailable（ローカルLLM に接続できない）を返す。"""
         candidates = self.change_candidates()
+        context = self._context(msg)
         try:
-            result = await self._extract(msg, candidates, self._context(msg))
+            result = await self._extract(msg, candidates, context)
         except LLMUnavailable as e:
             self.db.queue_failed(qid, str(e), None)  # 回数には数えない
             return "unavailable"
@@ -346,7 +351,7 @@ class ScheduleService:
             return "failed"
         self.db.dequeue(qid)
         try:
-            outcome = await self._apply_result(result, msg, candidates)
+            outcome = await self._apply_result(result, msg, candidates, context)
         except Exception as e:
             log.exception("再精査したメッセージの登録に失敗しました")
             outcome = AnalysisOutcome(skipped=f"登録に失敗しました: {e}")
@@ -505,8 +510,13 @@ class ScheduleService:
         """予定を登録する。同じ予定が既にあればまとめ、時間が重なる予定があれば確認待ちにする。"""
         return await self._place(event, same_as_id=same_as_id)
 
-    async def _place(self, event: Event, same_as_id: Optional[int] = None, existing: bool = False) -> EventResult:
-        """add_event の本体。existing=True なら DB にある予定（見送った予定など）の状態を変える。"""
+    async def _place(
+        self, event: Event, same_as_id: Optional[int] = None, existing: bool = False, hold: bool = False
+    ) -> EventResult:
+        """add_event の本体。existing=True なら DB にある予定（見送った予定など）の状態を変える。
+
+        hold=True なら（登録の基準で「確認」の宛先）、重なる予定がなくても確認待ちに入れる。
+        """
         change: Optional[EventChange] = None
         async with self._save_lock:
             same = self.db.get_event(same_as_id) if same_as_id else None
@@ -517,8 +527,13 @@ class ScheduleService:
                 if existing:
                     self.db.set_status(event.id, "merged")
             else:
+                if hold and (declined := self._find_similar(event, ("rejected",))):
+                    # 「追加しない」を選んだ予定のリマインドなど → もう一度は聞かない
+                    log.info("「追加しない」を選んだ予定と同じため、確認待ちに入れませんでした: %s %s", event.date, event.title)
+                    return EventResult(status="duplicate", event=declined)
                 conflicts, likely_same = self._sorted_conflicts(event, self.find_conflicts(event))
-                event.status = "pending" if conflicts else "confirmed"
+                event.status = "pending" if conflicts or hold else "confirmed"
+                event.held = hold
                 if existing:
                     self.db.set_status(event.id, event.status)
                 else:
@@ -533,19 +548,52 @@ class ScheduleService:
         if conflicts:
             await self.notifier.conflict(event, conflicts, likely_same)
             return EventResult(status="pending", event=event, conflicts=conflicts)
+        if hold:
+            await self.notifier.held(event)
+            return EventResult(status="pending", event=event)
         await self.notifier.added(event)
         return EventResult(status="added", event=event)
 
-    # ---------- 他の人の予定 ----------
-    async def skip_for_others(self, event: Event) -> EventResult:
-        """他の人だけの予定は登録せず、「見送り」として残す（あとから「追加する」で登録できる）。"""
+    def _find_similar(self, event: Event, statuses: tuple[str, ...]) -> Optional[Event]:
+        for e in self.db.list_events(statuses=statuses, on_date=event.date):
+            if _times_compatible(e, event) and _similar(e.title, event.title):
+                return e
+        return None
+
+    # ---------- 登録の基準（誰宛ての予定か） ----------
+    def audience_rules(self) -> AudienceRules:
+        return AudienceRules.from_settings(self.settings)
+
+    def save_audience_rules(self, data: dict) -> AudienceRules:
+        rules = save_audience_rules(self.db, self.settings, data)
+        log.info("登録の基準を変更しました: %s", rules.to_dict())
+        return rules
+
+    async def add_by_audience(
+        self,
+        event: Event,
+        raw: ExtractedEvent,
+        msg: IncomingMessage,
+        context: Optional[list[ContextMessage]] = None,
+    ) -> EventResult:
+        """誰宛ての予定かを決め、基準に従って登録・確認待ち・見送りにする。"""
+        rules = self.audience_rules()
+        j = judge(raw.audience, msg, rules, context or [])
+        event.audience, event.audience_reason = j.audience, j.reason
+        action = rules.action_for(j.audience)
+        log.info("%s（%s）→ %s: %s %s", j.label, j.reason, action, event.date, event.title)
+        if action == "skip":
+            return await self.skip_event(event)
+        return await self._place(event, hold=action == "confirm")
+
+    async def skip_event(self, event: Event) -> EventResult:
+        """登録せず「見送り」として通知に残す（あとから「自分の予定として追加する」で登録できる）。"""
         async with self._save_lock:
-            for e in self.db.list_events(statuses=("skipped",), on_date=event.date):
-                if _times_compatible(e, event) and _similar(e.title, event.title):
-                    return EventResult(status="duplicate", event=e)  # 同じものを見送り済み
+            if same := self._find_similar(event, ("skipped",)):
+                return EventResult(status="duplicate", event=same)  # 同じものを見送り済み
             event.status = "skipped"
             self.db.add_event(event)
-        log.info("他の人の予定として見送りました: %s %s", event.date, event.title)
+        log.info("見送りました: %s %s", event.date, event.title)
         await self.notifier.skipped(event)
         return EventResult(status="skipped", event=event)
 
@@ -558,7 +606,13 @@ class ScheduleService:
             raise ValueError("この予定は既に処理されています")
         return await self._place(event, existing=True)
 
-    async def handle_same(self, raw: ExtractedEvent, msg: IncomingMessage, candidates: list[Event]) -> Optional[EventResult]:
+    async def handle_same(
+        self,
+        raw: ExtractedEvent,
+        msg: IncomingMessage,
+        candidates: list[Event],
+        context: Optional[list[ContextMessage]] = None,
+    ) -> Optional[EventResult]:
         """LLM が「登録済みの予定と同じ」と判断した連絡。日時が矛盾しなければその予定にまとめる。"""
         target = {e.id: e for e in candidates}.get(raw.target_id) if raw.target_id else None
         if target is not None and not (raw.date or "").strip():
@@ -569,7 +623,7 @@ class ScheduleService:
         if target is not None and event.date == target.date and _times_compatible(target, event):
             return await self.add_event(event, same_as_id=target.id)
         # LLM の判断と日時が食い違う → 新しい予定として扱う（似た予定があればそこで照合される）
-        return await self.add_event(event)
+        return await self.add_by_audience(event, raw, msg, context)
 
     async def merge_pending(self, event_id: int, into_id: Optional[int] = None) -> Event:
         """確認待ちの予定を「同じ予定」として既存の予定にまとめる。"""

@@ -14,9 +14,14 @@
         <p class="eyebrow" id="today-label"></p>
         <h1 class="large-title">スケジュール</h1>
       </div>
-      <button class="icon-button filled" id="open-sheet" aria-label="予定を追加" title="予定を追加">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-      </button>
+      <div class="navbar-actions">
+        <button class="icon-button" id="open-settings" aria-label="登録の基準" title="登録の基準（名前・所属グループ・宛先ごとの扱い）">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+        </button>
+        <button class="icon-button filled" id="open-sheet" aria-label="予定を追加" title="予定を追加">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+      </div>
     </div>
     <nav class="segmented" role="tablist">
       <button role="tab" class="segment active" data-tab="events">予定</button>
@@ -68,6 +73,28 @@
         </div>
         <p class="footnote">開始時刻を空欄にすると終日の予定になります。</p>
         <button class="primary-button" type="submit"><span class="label">追加</span></button>
+      </form>
+    </section>
+  </div>
+
+  <!-- 登録の基準シート -->
+  <div class="sheet-backdrop" id="settings-sheet" hidden>
+    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="sheet-header">
+        <button class="text-button" id="close-settings" type="button">キャンセル</button>
+        <h2 id="settings-title">登録の基準</h2>
+        <button class="text-button end" type="submit" form="settings-form">保存</button>
+      </div>
+      <form id="settings-form" class="sheet-body settings">
+        <div class="section-label">あなた</div>
+        <div class="group">
+          <label class="row field"><span>名前</span><input name="names" placeholder="遥陽, はるひ" autocomplete="off"></label>
+          <label class="row field"><span>所属グループ</span><input name="groups" placeholder="students-2026" autocomplete="off"></label>
+        </div>
+        <p class="footnote">名前はメンションや呼びかけで使われる表示名・ニックネーム、所属グループは @ロール名 やチーム名です（どちらもカンマ区切り）。</p>
+        <div class="section-label">宛先ごとの扱い</div>
+        <div class="group" id="audience-actions"></div>
+        <p class="footnote">「確認」は確認待ちタブで追加するか選べます。「見送り」は通知タブに残り、「自分の予定として追加する」であとから登録できます。名前が出てくるメッセージは、ほかの条件より優先して自分宛てになります。</p>
       </form>
     </section>
   </div>

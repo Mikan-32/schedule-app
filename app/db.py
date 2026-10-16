@@ -30,7 +30,10 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL,
     updated_at TEXT,
     gcal_event_id TEXT,
-    gcal_hash TEXT
+    gcal_hash TEXT,
+    audience TEXT NOT NULL DEFAULT '',
+    audience_reason TEXT NOT NULL DEFAULT '',
+    held INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_events_date ON events(date);
 
@@ -131,6 +134,9 @@ MIGRATIONS = [
     ("notifications", "change_id", "INTEGER"),
     ("message_queue", "thread", "TEXT NOT NULL DEFAULT ''"),
     ("message_queue", "reply_to", "TEXT NOT NULL DEFAULT ''"),
+    ("events", "audience", "TEXT NOT NULL DEFAULT ''"),
+    ("events", "audience_reason", "TEXT NOT NULL DEFAULT ''"),
+    ("events", "held", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -163,6 +169,9 @@ def _row_to_event(row: sqlite3.Row) -> Event:
         updated_at=_dt(row["updated_at"]),
         gcal_event_id=row["gcal_event_id"],
         gcal_hash=row["gcal_hash"],
+        audience=row["audience"],
+        audience_reason=row["audience_reason"],
+        held=bool(row["held"]),
     )
 
 
@@ -233,7 +242,8 @@ class Database:
             cur = self._conn.execute(
                 """INSERT INTO events (title, date, start_time, end_time, location, description, status,
                    source, source_message_id, source_author, source_channel, source_url, raw_text,
-                   confidence, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   confidence, created_at, audience, audience_reason, held)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     ev.title,
                     ev.date.isoformat(),
@@ -250,6 +260,9 @@ class Database:
                     ev.raw_text,
                     ev.confidence,
                     created,
+                    ev.audience,
+                    ev.audience_reason,
+                    int(ev.held),
                 ),
             )
             self._conn.commit()

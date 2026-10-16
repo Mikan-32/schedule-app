@@ -11,6 +11,11 @@ os.environ["PREVENT_SLEEP"] = "off"
 os.environ["WINDOWS_NOTIFICATIONS"] = "false"
 os.environ["MY_NAMES"] = ""
 os.environ["OTHERS_MODE"] = "skip"
+os.environ["MY_GROUPS"] = ""
+# 既存のテストは宛先の判定とは関係ないので、宛先にかかわらず登録する（宛先ごとの扱いは test_audience.py で確かめる）
+os.environ["AUDIENCE_ME"] = "add"
+os.environ["AUDIENCE_ALL"] = "add"
+os.environ["AUDIENCE_UNKNOWN"] = "add"
 os.environ["LLM_RUNTIME"] = "external"  # テストで同梱の Ollama をダウンロード・起動しない
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
