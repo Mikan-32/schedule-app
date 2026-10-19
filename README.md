@@ -1,11 +1,12 @@
 # スケジュール管理アプリ
 
 Discord などに届いたメッセージ（文章・画像）をローカルLLMで精査し、予定を自動で登録するアプリです。
+**Windows・Mac・Linux** で動きます。
 ローカルLLM の実行環境（Ollama）はアプリに同梱されていて、初回起動時に自動で用意されます（別途インストール不要）。
-メッセージの受け取り方は「Windows の通知を直接読む（Bot 不要）」と「Discord Bot」の2通りで、併用もできます。
+メッセージの受け取り方は「PC の通知を直接読む（Bot 不要）」と「Discord Bot」の2通りで、併用もできます。
 
 ```
-Windows 通知 ──▶ WindowsNotificationConnector ─┐
+PC の通知    ──▶ NotificationConnector ─────────┐  （Windows: 通知API・通知DB / Mac: 通知DB / Linux: D-Bus）
 Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ ScheduleService ──▶ OllamaClient ──▶ 同梱の Ollama（ローカルLLM）
                                                  │      │  予定の検証・重複判定
                                                  │      ▼
@@ -18,7 +19,7 @@ Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ 
 
 | 項目 | 内容 |
 |---|---|
-| 対象アプリ | 現段階は Discord（Windows 通知なら `WINDOWS_NOTIFY_APPS` に Slack / Zoom 等を足すだけで対象にできる） |
+| 対象アプリ | 現段階は Discord（PC の通知なら `NOTIFY_APPS` に Slack / Zoom 等を足すだけで対象にできる） |
 | 精査方法 | ローカルLLM（アプリに同梱の Ollama）の API を使用。インストール済みモデルから精度の高いものを自動選択 |
 | 通知 | 予定追加時に「10月15日(木)14時から定例ミーティング」の形式で通知 |
 | 重複 | 同日に予定が被った場合は確認通知（Discord DM のボタン / Web UI で「追加する・追加しない」） |
@@ -30,30 +31,35 @@ Discord      ──▶ DiscordConnector (Bot) ────────┼─▶ 
 
 ## メッセージの受け取り方
 
-| | Windows 通知（Bot 不要） | Discord Bot |
+| | PC の通知（Bot 不要） | Discord Bot |
 |---|---|---|
-| 準備 | 不要（初回に通知へのアクセス許可） | Bot の作成・サーバーへの招待 |
+| 準備 | 不要（Windows は初回に通知へのアクセス許可、Mac は「フルディスクアクセス」の許可） | Bot の作成・サーバーへの招待 |
 | 読める範囲 | 通知が出るものすべて（個人 DM も可） | Bot が参加しているサーバーと Bot への DM |
 | 他のアプリ | Slack / Teams / Zoom / LINE なども設定だけで対象 | Discord のみ |
 | 画像の精査 | できない（通知に画像の中身は含まれない）→ Web UI に貼り付ければ精査できる | できる（Bot が読めるメッセージのみ） |
 | 長文 | 通知に表示される範囲のみ | 全文 |
 | 取りこぼし | 通知が出ないもの（開いているチャンネル・ミュート中）は読めない | なし |
-| 動作条件 | Windows の PC が起動中 | PC が起動中（OS は問わない） |
+| 動作条件 | PC が起動中（Windows・Mac・Linux） | PC が起動中（OS は問わない） |
 
-おすすめは **Windows 通知を基本にして、DM 通知・確認ボタン・画像の精査が欲しければ Discord Bot を併用** する形です。
+おすすめは **PC の通知を基本にして、DM 通知・確認ボタン・画像の精査が欲しければ Discord Bot を併用** する形です。
 併用する場合は `.env` で `DISCORD_READ_CHANNELS=false` にすると、同じメッセージを二重に精査しません。
 
-Bot を入れなくても、画像は Discord などで「画像をコピー」して Web UI に **Ctrl+V** で貼り付ければ精査できます（[使い方](#使い方)）。
+Bot を入れなくても、画像は Discord などで「画像をコピー」して Web UI に **Ctrl+V**（Mac は **⌘V**）で貼り付ければ精査できます（[使い方](#使い方)）。
 Bot は個人どうしの DM を読めないので、友だちから DM で届いた画像はこの方法で読み取ります。
 
 ## 必要なもの
 
 - Python 3.10 以上
 - 空き容量 約 7GB（ローカルLLM の実行環境 約 110MB ＋ モデル 約 6GB。アプリが `data\ollama` に自動で用意します）
-- Windows 10 / 11（Windows 通知を読む場合）
+- 次のどれか
+  - Windows 10 / 11
+  - macOS 14 (Sonoma) 以降（Apple シリコン・Intel。同梱の Ollama の要件）
+  - Linux（x86_64 / ARM64。通知を読むには GNOME・KDE などのデスクトップ環境）
 - Discord Bot（任意）
 
-## セットアップ（Windows / PowerShell）
+## セットアップ
+
+### Windows（PowerShell）
 
 ```powershell
 cd schedule-app
@@ -63,14 +69,32 @@ pip install -r requirements.txt
 copy .env.example .env      # 中身を編集
 ```
 
+### Mac・Linux（ターミナル）
+
+```bash
+cd schedule-app
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cp .env.example .env        # 中身を編集
+```
+
+- Mac: Python は [python.org](https://www.python.org/downloads/macos/) のインストーラーか Homebrew（`brew install python`）で入れます
+- Linux: Ubuntu などでは先に `sudo apt install python3-venv` が必要なことがあります
+- 以下の手順で `python` と書いてあるところは、Mac・Linux では `.venv/bin/python` に読み替えてください
+
 ### 1. ローカルLLM（自動で用意されます）
 
 ローカルLLM の実行環境（[Ollama](https://ollama.com/)）はアプリに同梱されています。**インストールは不要** で、
 初回起動時にアプリが次の順で `data\ollama` に用意します（進み具合は Web UI 下部に表示されます）。
 
-1. Ollama の公式リリース（GitHub）から、必要なファイルだけを取り出す（GPU のない PC で約 40MB。
-   公式の zip は約 1.5GB ありますが、大半は NVIDIA GPU 用のライブラリなので、GPU がなければ読みません）
-2. 別途インストールした Ollama に同じモデルがあれば取り込む（同じドライブならハードリンクなので容量は増えません）
+1. Ollama の公式リリース（GitHub）から、OS に合った実行ファイルを取り出す
+   - Windows: 必要なファイルだけを読む（GPU のない PC で約 40MB。公式の zip は約 1.5GB ありますが、
+     大半は NVIDIA GPU 用のライブラリなので、GPU がなければ読みません）
+   - Mac: 約 170MB（Intel・Apple シリコン共通。Apple シリコンでは GPU（Metal）を使うので、CPU だけの PC より速く動きます）
+   - Linux: 約 1.4GB をダウンロードし、必要なファイル（約 100MB）だけを残す（NVIDIA GPU のドライバーがあれば GPU 用も。
+     圧縮形式の都合で一部だけ読むことはできません）。公式の sha256 で壊れていないかを確かめます
+2. 別途インストールした Ollama に同じモデルがあれば取り込む（同じドライブならハードリンクなので容量は増えません。
+   Linux で公式のインストーラーを使った場合の `/usr/share/ollama/.ollama/models` も探します）
 3. なければ `qwen3-vl:8b-instruct`（画像対応・日本語OK、約 6GB）をダウンロードする
 
 2 回目以降はすぐに起動します。同梱の Ollama はアプリと一緒に起動・終了し、ポート `11435` を使うので、
@@ -83,6 +107,13 @@ copy .env.example .env      # 中身を編集
   ```powershell
   $env:OLLAMA_HOST = "127.0.0.1:11435"
   data\ollama\bin\v0.40.2-cpu\ollama.exe pull gemma3:12b    # NVIDIA GPU がある PC では v0.40.2-nvidia
+  ```
+
+  Mac・Linux では（ターミナルで）:
+
+  ```bash
+  OLLAMA_HOST=127.0.0.1:11435 data/ollama/bin/v0.40.2-metal/ollama pull gemma3:12b     # Mac（Intel の Mac は v0.40.2-cpu）
+  OLLAMA_HOST=127.0.0.1:11435 data/ollama/bin/v0.40.2-cpu/bin/ollama pull gemma3:12b   # Linux（NVIDIA GPU があれば v0.40.2-nvidia）
   ```
 
 `OLLAMA_MODEL=auto`（既定）の場合、インストール済みのモデルから次の優先順で自動選択します
@@ -105,22 +136,51 @@ copy .env.example .env      # 中身を編集
 > `LLM_THINK=false` でも毎回長く考えてから答えます。GPU のない PC では 1 件に数分かかります。
 > 両方入っている場合、`LLM_THINK=false` なら自動選択は考え込まない方を優先します。
 
-### 2. Windows 通知を読む設定（Bot 不要）
+### 2. PC の通知を読む設定（Bot 不要）
 
-`.env` の既定値のままで、Windows では自動的に有効になります（`WINDOWS_NOTIFICATIONS=auto`）。
+`.env` の既定値のままで、Windows・Mac・Linux では自動的に有効になります（`NOTIFICATIONS=auto`）。
+どの OS でも、読み取れているかは次のコマンドで確かめられます（アプリのフォルダで。Mac・Linux は `.venv/bin/python`）。
+`[OK]` と最近の通知が表示され、Discord で自分あてにメッセージを送ると 30 秒以内にそれも表示されれば OK です。
+
+```
+python -m app.connectors.notifications
+```
+
+#### Windows
 
 1. Discord（PC 版）の **ユーザー設定 → 通知 → デスクトップ通知を有効にする** を ON
 2. Windows の **設定 → システム → 通知** で Discord の通知が ON になっていることを確認
 3. 初回起動時に「通知へのアクセス」を求められたら許可します。拒否されている場合は
    **設定 → プライバシーとセキュリティ → 通知** でアクセスを許可してください
-4. Slack なども対象にする場合は `.env` の `WINDOWS_NOTIFY_APPS=Discord,Slack,Teams,Zoom,LINE` のように追加
+4. Slack なども対象にする場合は `.env` の `NOTIFY_APPS=Discord,Slack,Teams,Zoom,LINE` のように追加
 
 読み取りは次の順に試し、使えたものを使います（Web UI 下部に表示されます）。
 
 - **通知API**: Windows 公式の通知読み取り API（UserNotificationListener）
 - **通知データベース**: 上が使えない場合、通知センターのデータベース（`%LOCALAPPDATA%\Microsoft\Windows\Notifications\wpndatabase.db`）を読み取り専用で参照
 
-> 「応答不可（集中モード）」中でも通知センターに入った通知は読み取れます。
+#### Mac
+
+1. Discord（Mac 版）の **ユーザー設定 → 通知 → デスクトップ通知を有効にする** を ON にし、
+   Mac の **システム設定 → 通知 → Discord** で「通知を許可」が ON になっていることを確認
+2. **システム設定 → プライバシーとセキュリティ → フルディスクアクセス** で、アプリを起動するターミナル
+   （「ターミナル」や iTerm など）をオンにして、ターミナルを開き直す
+   - macOS 15 以降は通知の履歴がプライバシー保護の対象になったため、許可がないと読めません（macOS 14 は不要）
+   - 自動起動（手順 5）で動かすときは、ターミナルではなく **Python** をオンにします。オンにする Python は
+     `install_autostart.sh` が表示します（「＋」を押し、Command+Shift+G でその場所を貼り付けて追加）。
+     Homebrew で Python を更新すると場所が変わるので、そのときはもう一度追加してください
+3. Slack なども対象にする場合は `.env` の `NOTIFY_APPS` に追加
+
+アプリは通知センターのデータベース（macOS 15 以降は `~/Library/Group Containers/group.com.apple.usernoted/db2/db`）を
+読み取り専用で参照します。
+
+#### Linux
+
+1. GNOME・KDE などのデスクトップにログインした状態でアプリを動かします（通知は D-Bus のセッションバスで受け取ります。特別な権限は不要）
+2. Discord の **ユーザー設定 → 通知 → デスクトップ通知を有効にする** を ON
+3. Slack なども対象にする場合は `.env` の `NOTIFY_APPS` に追加
+
+> 「応答不可（集中モード・おやすみモード）」中でも、通知センターに入った通知（Linux はアプリが出した通知）は読み取れます。
 > Discord で今開いているチャンネルのメッセージや、ミュート中のチャンネルは通知が出ないため対象外です。
 
 ### 3. Discord Bot を作る（任意）
@@ -133,13 +193,13 @@ copy .env.example .env      # 中身を編集
 6. 監視するチャンネルを絞る場合は、チャンネルを右クリック →「チャンネルIDをコピー」→ `DISCORD_WATCH_CHANNEL_IDS`（カンマ区切り）
 
 > Discord の規約上、Bot は「Bot が参加しているサーバーのチャンネル」と「Bot への DM」しか読めません。
-> 個人間の DM などに届いた予定は、Windows 通知で読むか、そのメッセージを Bot に **転送** すると精査されます。
+> 個人間の DM などに届いた予定は、PC の通知で読むか、そのメッセージを Bot に **転送** すると精査されます。
 > Bot から DM を受け取るには、Bot と同じサーバーに参加している必要があります（自分専用のサーバーに招待すれば OK）。
 
 ### 4. 起動
 
 ```powershell
-python run.py
+python run.py               # Mac・Linux は .venv/bin/python run.py
 ```
 
 ブラウザで http://127.0.0.1:8000 を開きます。ログは `data\app.log` にも保存されます。
@@ -157,9 +217,22 @@ powershell -ExecutionPolicy Bypass -File scripts\install_autostart.ps1
 - 解除する: `powershell -ExecutionPolicy Bypass -File scripts\uninstall_autostart.ps1`
 - 既に起動していれば、`python run.py` を実行しても二重には起動しません
 
+Mac・Linux では（管理者権限は不要）:
+
+```bash
+bash scripts/install_autostart.sh
+```
+
+- Mac は launchd、Linux は systemd のユーザーサービス（使えない環境ではデスクトップの自動起動）に登録し、すぐに起動します。
+  異常終了したときは自動で起動し直します。止め方・起動し直し方はスクリプトが表示します
+- Mac で通知を読むには、表示された Python に「フルディスクアクセス」を許可してください（[2. PC の通知を読む設定](#mac)）
+- 解除する: `bash scripts/uninstall_autostart.sh`
+
 **スリープ対策**: アプリの実行中は、電源につないでいる間 PC がスリープしないようにしています（`PREVENT_SLEEP=ac`）。
-電源設定そのものは変えず、アプリを終了すると元に戻ります。ノート PC のカバーを閉じたときもスリープさせたくない場合は、
-Windows の **コントロール パネル → 電源オプション → カバーを閉じたときの動作** で「電源に接続」を「何もしない」にしてください。
+電源設定そのものは変えず、アプリを終了すると元に戻ります（Mac は `caffeinate`、Linux は `systemd-inhibit` を使います）。
+ノート PC のカバーを閉じたときもスリープさせたくない場合は、
+Windows の **コントロール パネル → 電源オプション → カバーを閉じたときの動作** で「電源に接続」を「何もしない」にしてください
+（Mac はカバーを閉じると、外部ディスプレイにつないでいるとき以外はスリープします）。
 
 ### 6. Google カレンダーと同期する（任意・おすすめ）
 
@@ -213,7 +286,7 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 - 同じチャンネル（DM は相手ごと）の直前のメッセージ（既定: 3 時間以内の 8 件）と返信先も LLM に渡すので、
   「来週の定例、15日と16日どっちがいい？」→「じゃあ15日で決定」のように、やり取りの中で決まった予定も拾えます。
   「了解です」のような日時の表現がない返事も、直前に予定の話があれば精査します。
-  - Windows 通知で読む場合、自分が送ったメッセージは通知が出ないため文脈に入りません（ほかの人の発言から判断します）
+  - PC の通知で読む場合、自分が送ったメッセージは通知が出ないため文脈に入りません（ほかの人の発言から判断します）
 - **登録の基準**: 見つけた予定が誰宛てかを決め、宛先ごとの扱いで登録・確認待ち・見送りにします。
   Web UI の右上の設定ボタン（「＋」の左）から、名前・所属グループ・宛先ごとの扱いを変えられます（保存するとすぐ反映。再起動不要）。
 
@@ -234,7 +307,7 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 - ローカルLLM が止まっているとき（初回の準備中を含む）に届いたメッセージは捨てずに保存し、つながったら自動で精査します（Web UI 下部に「精査待ち」の件数）。
   LLM の応答が壊れているなどで 3 回失敗したものは「精査できなかったメッセージ」になり、「再試行」でやり直せます。
 - Web UI の「＋」から、メッセージの貼り付け解析や手動入力もできます。
-  - 画像（チラシ・お知らせのスクリーンショットなど）は、Discord などで「画像をコピー」して Web UI で **Ctrl+V** すると追加できます（シートを開いていなくても可）。
+  - 画像（チラシ・お知らせのスクリーンショットなど）は、Discord などで「画像をコピー」して Web UI で **Ctrl+V**（Mac は **⌘V**）すると追加できます（シートを開いていなくても可）。
     画像ファイルのドラッグ＆ドロップや「画像を選択」でも追加できます（1 回 4 枚、1 枚 20MB まで）。
   - 解析は裏で進むので、終わるのを待たずに次を貼り付けたり、シートを閉じたりできます。CPU だけの PC だと画像 1 枚で 3〜4 分かかります。
     結果はシートと「通知」タブに出ます（予定が見つからなかったとき・登録済みだったときも「通知」に残ります）。
@@ -245,20 +318,26 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 
 | キー | 既定値 | 説明 |
 |---|---|---|
-| `WINDOWS_NOTIFICATIONS` | `auto` | Windows 通知の読み取り。`auto`=Windows なら有効 / `true` / `false` |
-| `WINDOWS_NOTIFY_APPS` | `Discord` | 対象アプリ（表示名の部分一致、カンマ区切り） |
-| `WINDOWS_NOTIFY_BACKEND` | `auto` | `auto` / `winrt`（通知API）/ `database`（通知データベース） |
-| `WINDOWS_NOTIFY_POLL_SEC` | `2` | 新着通知を確認する間隔（秒） |
-| `WINDOWS_NOTIFY_BACKFILL_MIN` | `30` | 起動時に、直近何分以内の通知までさかのぼって精査するか |
+| `NOTIFICATIONS` | `auto` | PC の通知の読み取り。`auto`=Windows・Mac・Linux なら有効 / `true` / `false` |
+| `NOTIFY_APPS` | `Discord` | 対象アプリ（表示名・アプリID の部分一致、カンマ区切り） |
+| `NOTIFY_BACKEND` | `auto` | 読み取り方式。`auto`=OS ごとに使えるものを順に試す。Windows では `winrt`（通知API）/ `database`（通知データベース）も指定可 |
+| `NOTIFY_POLL_SEC` | `2` | 新着通知を確認する間隔（秒） |
+| `NOTIFY_BACKFILL_MIN` | `30` | 起動時に、直近何分以内の通知までさかのぼって精査するか |
+| `NOTIFY_DB_PATH` | OS の既定 | 通知データベースの場所（Windows・Mac。ふつうは指定不要） |
+
+`NOTIFY_*` は以前 `WINDOWS_NOTIFY_*`（`WINDOWS_NOTIFICATIONS` など）という名前でした。以前の名前もそのまま使えます。
+
+| キー | 既定値 | 説明 |
+|---|---|---|
 | `DISCORD_BOT_TOKEN` | なし | 未設定なら Discord Bot は無効 |
 | `DISCORD_READ_CHANNELS` | `true` | `false` にすると Bot はチャンネルを読まず DM 通知だけ行う |
 | `DISCORD_OWNER_ID` | なし | DM 通知の送り先。Bot への DM はこのユーザーからのみ受け付け |
 | `DISCORD_WATCH_CHANNEL_IDS` | 全チャンネル | 監視するチャンネルID（スレッドは親チャンネルIDでも可） |
-| `LLM_RUNTIME` | `auto` | `auto`=Windows ではアプリに同梱の Ollama を使う / `embedded` / `external`=自分でインストールした Ollama を使う |
+| `LLM_RUNTIME` | `auto` | `auto`=Windows・Mac・Linux ではアプリに同梱の Ollama を使う / `embedded` / `external`=自分でインストールした Ollama を使う |
 | `EMBEDDED_OLLAMA_VERSION` | `v0.40.2` | 同梱の Ollama のバージョン（変えると次回起動時に入れ替え） |
 | `EMBEDDED_OLLAMA_PORT` | `11435` | 同梱の Ollama のポート |
 | `EMBEDDED_MODEL` | `qwen3-vl:8b-instruct` | 同梱の Ollama にモデルがないとき、最初に用意するモデル |
-| `EMBEDDED_GPU` | `auto` | `auto`=NVIDIA のドライバーがあれば GPU 用のライブラリも用意 / `cpu` / `nvidia` |
+| `EMBEDDED_GPU` | `auto` | `auto`=NVIDIA のドライバーがあれば GPU 用のライブラリも用意 / `cpu` / `nvidia`（Windows・Linux。Mac は Apple シリコンなら自動で GPU を使う） |
 | `EMBEDDED_IMPORT_MODELS` | `true` | 別途インストールした Ollama に同じモデルがあれば取り込む |
 | `EMBEDDED_OLLAMA_DIR` | `data/ollama` | 同梱の Ollama の実行ファイル・モデル・ログ（`server.log`）の置き場 |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | `LLM_RUNTIME=external` のときの接続先 |
@@ -282,7 +361,7 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 | `OTHERS_MODE` | `skip` | 他の人宛ての予定の扱い（同上） |
 | `QUEUE_RETRY_SEC` | `60` | 精査できなかったメッセージを何秒ごとに再精査するか |
 | `QUEUE_MAX_ATTEMPTS` | `3` | LLM の応答エラーなどで何回失敗したらあきらめるか（接続できないだけなら数えない） |
-| `PREVENT_SLEEP` | `ac` | アプリ実行中のスリープ防止（Windows）。`ac`=電源接続中だけ / `always` / `off` |
+| `PREVENT_SLEEP` | `ac` | アプリ実行中のスリープ防止（Windows・Mac・Linux）。`ac`=電源接続中だけ / `always` / `off` |
 | `LOG_FILE` | `data/app.log` | ログファイル |
 | `GOOGLE_CALENDAR` | `auto` | Google カレンダー同期。`auto`=credentials.json があれば有効 / `true` / `false` |
 | `GOOGLE_CREDENTIALS` | `data/google/credentials.json` | Google Cloud でダウンロードした OAuth クライアント |
@@ -310,19 +389,23 @@ app/
   llm/prompts.py            抽出プロンプト（基準日と参照カレンダーで相対日付を解決）
   connectors/base.py        連絡ツール共通インターフェース
   connectors/discord_bot.py Discord Bot（受信・DM通知・確認ボタン）
-  connectors/windows_notifications.py  Windows 通知の読み取り（通知API / 通知データベース）
+  connectors/notifications.py          PC の通知を読むコネクタ（共通部分・読み取りの確認コマンド）
+  connectors/windows_notifications.py  Windows の通知の読み取り（通知API / 通知データベース）
+  connectors/macos_notifications.py    Mac の通知の読み取り（通知センターのデータベース）
+  connectors/linux_notifications.py    Linux の通知の読み取り（D-Bus のセッションバス）
   gcal.py                   Google カレンダー同期（OAuth・専用カレンダー・一方向同期）
-  power.py                  実行中のスリープ防止（Windows）
+  power.py                  実行中のスリープ防止（Windows・Mac・Linux）
   background.py             定期実行タスク（再精査・同期）
   web/api.py                REST API
   static/                   Web UI（HTML/CSS/JS）
 scripts/install_autostart.ps1    Windows サインイン時の自動起動を登録（uninstall_autostart.ps1 で解除）
+scripts/install_autostart.sh     Mac・Linux のログイン時の自動起動を登録（uninstall_autostart.sh で解除）
 tests/                      pytest
 ```
 
 ## Slack / Zoom を追加するには
 
-Windows 通知で読む場合は `.env` の `WINDOWS_NOTIFY_APPS` にアプリ名を足すだけです。
+PC の通知で読む場合は `.env` の `NOTIFY_APPS` にアプリ名を足すだけです。
 それぞれの API（Slack Bot など）で全文や画像まで読みたい場合は、`app/connectors/base.py` の `Connector` を継承したクラスを作り、受信メッセージを `IncomingMessage` に変換して
 `service.handle_message()` に渡します。そのツールにも通知を送る場合は `notify_added` / `notify_conflict` を実装して
 `notifier.register()` で登録し、最後に `app/connectors/__init__.py` の `build_connectors()` に追加します。
@@ -333,3 +416,6 @@ Windows 通知で読む場合は `.env` の `WINDOWS_NOTIFY_APPS` にアプリ�
 pip install -r requirements-dev.txt
 pytest
 ```
+
+Mac・Linux では `.venv/bin/python -m pip install -r requirements-dev.txt` → `.venv/bin/python -m pytest`。
+Linux で `dbus-daemon` があれば、本物のセッションバスでの通知の受け取りも確かめます。

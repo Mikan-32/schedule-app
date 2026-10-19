@@ -25,9 +25,14 @@ def setup_logging() -> None:
     settings.log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(settings.log_file, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-    console = logging.StreamHandler()
-    console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%H:%M:%S"))
-    logging.basicConfig(level=logging.INFO, handlers=[console, file_handler])
+    handlers: list[logging.Handler] = [file_handler]
+    # 画面（ターミナル）や systemd のジャーナルに出すときだけ、画面にもログを出す。
+    # 自動起動（launchd など）で出力をファイルに送っているときは、data/app.log と同じ内容が増え続けないようにする
+    if (sys.stderr is not None and sys.stderr.isatty()) or os.environ.get("JOURNAL_STREAM"):
+        console = logging.StreamHandler()
+        console.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%H:%M:%S"))
+        handlers.insert(0, console)
+    logging.basicConfig(level=logging.INFO, handlers=handlers)
     logging.getLogger("discord").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
 

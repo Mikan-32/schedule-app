@@ -8,7 +8,7 @@ import pytest
 # テストが本物の Google カレンダーや PC の電源設定に触れないようにする（.env より優先される）
 os.environ["GOOGLE_CALENDAR"] = "false"
 os.environ["PREVENT_SLEEP"] = "off"
-os.environ["WINDOWS_NOTIFICATIONS"] = "false"
+os.environ["NOTIFICATIONS"] = "false"  # PC の通知の読み取り（以前の名前 WINDOWS_NOTIFICATIONS より優先される）
 os.environ["MY_NAMES"] = ""
 os.environ["OTHERS_MODE"] = "skip"
 os.environ["MY_GROUPS"] = ""

@@ -1,20 +1,30 @@
-"""アプリに同梱する Ollama（ローカルLLM の実行環境）。
+"""アプリに同梱する Ollama（ローカルLLM の実行環境）。Windows・macOS・Linux に対応。
 
 Ollama を別にインストールしなくても動くように、アプリが専用の Ollama を data/ollama/ に用意し、
 アプリと一緒に起動・停止する。
 
-- 実行ファイル: GitHub の公式リリース（Windows 用の単体版 zip）から必要なファイルだけを取り出す。
-  zip は約 1.5GB あるが大半は NVIDIA GPU 用のライブラリで、GPU のない PC では約 40MB のダウンロードで済む
-  （HTTP の Range 指定で、zip の必要な部分だけを読む）。
+- 実行ファイル: GitHub の公式リリースから、OS に合った配布ファイルを取り出す。
+  - Windows: 単体版の zip（約 1.5GB）。大半は NVIDIA GPU 用のライブラリなので、HTTP の Range 指定で
+    zip の必要な部分だけを読む（GPU のない PC では約 40MB のダウンロードで済む）。
+  - macOS: ollama-darwin.tgz（約 170MB。Intel・Apple シリコン共通。Apple シリコンでは GPU（Metal）を使う）。
+  - Linux: ollama-linux-{amd64|arm64}.tar.zst（約 1.4GB）。zstd 圧縮は一部だけ読むことができないので全体を
+    ダウンロードし、NVIDIA GPU 用のライブラリはドライバーがあるときだけ書き出す（書き出すのは約 100MB）。
+  zip 以外は、公式の sha256sum.txt と照らし合わせて壊れていないかを確かめる。
 - モデル: data/ollama/models に保存する。別途インストールした Ollama に同じモデルがあれば取り込み
   （同じドライブならハードリンクなので容量は増えない）、なければダウンロードする。
 - 別のポート（既定 11435）で起動するので、別途インストールした Ollama（11434）とはぶつからない。
-- アプリが異常終了しても Ollama だけが残らないよう、Windows のジョブ オブジェクトに入れて一緒に終わらせる。
+- アプリが異常終了しても Ollama だけが残らないよう、Windows ではジョブ オブジェクトに入れて一緒に終わらせ、
+  Linux では親（アプリ）が終わったら止まるようにする（util-linux の setpriv --pdeathsig）。
+  macOS で残った場合は、次にアプリを起動したときにそのまま使う。
 """
 from __future__ import annotations
 
 import asyncio
 import ctypes
+import functools
+import gzip
+import hashlib
+import io
 import json
 import logging
 import os
@@ -23,22 +33,30 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
+import threading
 import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Awaitable, Callable, Iterable, Optional
+from typing import Awaitable, Callable, Iterable, Iterator, Optional
 
 import httpx
 
-from ..config import Settings
+from ..config import Settings, os_kind
 
 log = logging.getLogger(__name__)
 
-RELEASE_URL = "https://github.com/ollama/ollama/releases/download/{version}/ollama-windows-{arch}.zip"
-# GPU 用のライブラリ（NVIDIA は cuda_v12 / cuda_v13、AMD は別の zip）。GPU のない PC では取り出さない
+RELEASE_BASE = "https://github.com/ollama/ollama/releases/download/{version}/"
+RELEASE_URL = RELEASE_BASE + "ollama-windows-{arch}.zip"
+SHA256_FILE = "sha256sum.txt"
+# GPU 用のライブラリ（NVIDIA は cuda_v12 / cuda_v13、AMD は別の配布ファイル）。NVIDIA のドライバーがない PC では取り出さない
 GPU_DIR_PREFIXES = ("lib/ollama/cuda_", "lib/ollama/rocm")
 COMPLETE_MARK = ".complete"
+# 公式のインストーラー（Linux）でサービスとして入れた Ollama のモデル置き場
+SYSTEM_MODEL_DIRS: tuple[Path, ...] = (Path("/usr/share/ollama/.ollama/models"),)
+# NVIDIA のドライバーがあるかの目印（Linux）。WSL2 では Windows 側のドライバーがここに見える
+NVIDIA_LINUX_MARKERS = ("/proc/driver/nvidia/version", "/usr/lib/wsl/lib/libcuda.so.1")
 
 
 @dataclass
@@ -56,30 +74,77 @@ def windows_arch(machine: Optional[str] = None) -> str:
     return "arm64" if m in ("arm64", "aarch64") else "amd64"
 
 
+@dataclass(frozen=True)
+class RuntimeAsset:
+    """OS ごとの Ollama の配布ファイル。"""
+
+    name: str  # 配布ファイル名（ollama-windows-amd64.zip など）
+    kind: str  # zip: 必要な部分だけ読む / tgz・tzst: 全体を順に読み、必要なファイルだけ書き出す
+    exe: str  # 取り出した中での実行ファイルの場所
+
+    def url(self, version: str) -> str:
+        return RELEASE_BASE.format(version=version) + self.name
+
+
+def runtime_asset(platform_name: Optional[str] = None, machine: Optional[str] = None) -> RuntimeAsset:
+    """この PC 用の Ollama の配布ファイル。配布されていない OS・CPU なら RuntimeError。"""
+    kind = os_kind(platform_name)
+    m = (machine if machine is not None else platform.machine()).lower()
+    if kind == "windows":
+        return RuntimeAsset(f"ollama-windows-{windows_arch(m)}.zip", "zip", "ollama.exe")
+    if kind == "macos":
+        return RuntimeAsset("ollama-darwin.tgz", "tgz", "ollama")  # Intel・Apple シリコン共通
+    if kind == "linux":
+        arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(m)
+        if arch:
+            return RuntimeAsset(f"ollama-linux-{arch}.tar.zst", "tzst", "bin/ollama")
+        raise RuntimeError(
+            f"この CPU（{m}）用の Ollama は配布されていません。.env で LLM_RUNTIME=external にして、"
+            "別途インストールした Ollama を使ってください"
+        )
+    raise RuntimeError(
+        "この OS では同梱の Ollama を使えません。.env で LLM_RUNTIME=external にして、別途インストールした Ollama を使ってください"
+    )
+
+
 def has_nvidia_driver() -> bool:
-    if sys.platform != "win32":
-        return False
-    return (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "nvcuda.dll").exists()
+    kind = os_kind()
+    if kind == "windows":
+        return (Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "nvcuda.dll").exists()
+    if kind == "linux":
+        if any(Path(p).exists() for p in NVIDIA_LINUX_MARKERS):
+            return True
+        import ctypes.util
+
+        return ctypes.util.find_library("cuda") is not None
+    return False
 
 
 def wanted_variant(setting: str) -> str:
-    """EMBEDDED_GPU（auto / cpu / nvidia）から、取り出すライブラリの種類を決める。"""
+    """取り出すライブラリの種類。Windows・Linux は EMBEDDED_GPU（auto / cpu / nvidia）から決める。
+
+    macOS は配布ファイルが 1 種類なので、名前（data/ollama/bin/<版>-<種類>）の区別だけ: Apple シリコンは metal、Intel は cpu。
+    """
+    if os_kind() == "macos":
+        return "metal" if platform.machine().lower() in ("arm64", "aarch64") else "cpu"
     setting = (setting or "auto").strip().lower()
     if setting in ("cpu", "nvidia"):
         return setting
     return "nvidia" if has_nvidia_driver() else "cpu"
 
 
+def wanted_file(name: str, variant: str) -> bool:
+    """配布ファイルの中のファイルを取り出すか。GPU 用のライブラリは NVIDIA 向け（variant=nvidia）のときだけ。
+
+    macOS の tar に入っている付随ファイル（._ で始まるもの）も取り出さない。
+    """
+    if name.startswith(GPU_DIR_PREFIXES) and not (variant == "nvidia" and name.startswith("lib/ollama/cuda_")):
+        return False
+    return not PurePosixPath(name).name.startswith("._")
+
+
 def select_members(infos: Iterable[zipfile.ZipInfo], variant: str) -> list[zipfile.ZipInfo]:
-    out = []
-    for info in infos:
-        if info.is_dir():
-            continue
-        name = info.filename
-        if name.startswith(GPU_DIR_PREFIXES) and not (variant == "nvidia" and name.startswith("lib/ollama/cuda_")):
-            continue
-        out.append(info)
-    return out
+    return [info for info in infos if not info.is_dir() and wanted_file(info.filename, variant)]
 
 
 class HttpRangeFile:
@@ -203,6 +268,190 @@ def download_runtime(url: str, dest: Path, variant: str, client: httpx.Client, p
     return dest / "ollama.exe"
 
 
+class DownloadCancelled(RuntimeError):
+    """アプリの終了などでダウンロードをやめた。"""
+
+
+class _DownloadReader(io.RawIOBase):
+    """ダウンロード中のデータを先頭から順に読めるファイルにする（読んだ分の sha256 と進み具合も数える）。
+
+    stop が立ったら DownloadCancelled（Linux の約 1.4GB のダウンロード中でも、アプリをすぐ終了できるように）。
+    """
+
+    def __init__(self, chunks: Iterator[bytes], digest, progress: Progress, stop: Optional[threading.Event] = None):
+        self._chunks = chunks
+        self._digest = digest
+        self._progress = progress
+        self._stop = stop
+        self._buf = b""
+        self._pos = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def _take(self, chunk: bytes) -> bytes:
+        if self._stop is not None and self._stop.is_set():
+            raise DownloadCancelled("Ollama のダウンロードを中断しました")
+        self._digest.update(chunk)
+        self._progress.done += len(chunk)
+        return chunk
+
+    def readinto(self, b) -> int:
+        while self._pos >= len(self._buf):
+            chunk = next(self._chunks, None)
+            if chunk is None:
+                return 0
+            self._buf, self._pos = self._take(chunk), 0
+        n = min(len(b), len(self._buf) - self._pos)
+        b[:n] = self._buf[self._pos : self._pos + n]
+        self._pos += n
+        return n
+
+    def drain(self) -> None:
+        """残り（tar の終わりの空きなど）も受け取り、sha256 をファイル全体で計算する。"""
+        for chunk in self._chunks:
+            self._take(chunk)
+
+
+def _decompressed(kind: str, raw: io.BufferedIOBase):
+    if kind == "tgz":
+        return gzip.GzipFile(fileobj=raw, mode="rb")
+    if kind == "tzst":
+        try:
+            from compression import zstd  # type: ignore  # Python 3.14 以降の標準ライブラリ
+
+            return zstd.ZstdFile(raw)
+        except ImportError:
+            pass
+        try:
+            import zstandard  # type: ignore
+        except ImportError as e:
+            raise RuntimeError(
+                "zstd 形式を展開するライブラリ（zstandard）が入っていません。pip install -r requirements.txt をやり直してください"
+            ) from e
+        return zstandard.ZstdDecompressor().stream_reader(raw, read_across_frames=True)
+    raise ValueError(f"未対応の形式: {kind}")
+
+
+def _member_name(name: str) -> str:
+    """tar の中のパスを正規化する（先頭の ./ などを除く）。絶対パス・外に出るパスは RuntimeError。"""
+    p = PurePosixPath(name)
+    if p.is_absolute() or ".." in p.parts:
+        raise RuntimeError(f"配布ファイルに不正なパスがあります: {name}")
+    return "/".join(x for x in p.parts if x not in ("", "."))
+
+
+def _inside(root: str, path: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _extract_member(tf: tarfile.TarFile, m: tarfile.TarInfo, root: Path, variant: str) -> None:
+    name = _member_name(m.name)
+    if not name or not wanted_file(name, variant):
+        return
+    target = root.joinpath(*name.split("/"))
+    # 書き出す場所は、先に作ったシンボリックリンクをたどった本当の場所で確かめる（リンクを重ねて外に出るのを防ぐ）
+    real_root = os.path.realpath(root)
+    real_parent = os.path.realpath(target.parent)
+    if not _inside(real_root, real_parent):
+        raise RuntimeError(f"配布ファイルに不正なパスがあります: {m.name}")
+    if m.isdir():
+        target.mkdir(parents=True, exist_ok=True)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        target.unlink()  # 既にあるリンクの先に書き込まない
+    if m.issym() or m.islnk():
+        # libggml-base.so → libggml-base.so.0 のようなリンク。取り出す場所の外を指すものは拒否する
+        if m.issym():
+            linked = os.path.realpath(os.path.join(real_parent, m.linkname))
+        else:
+            linked = os.path.realpath(root.joinpath(*_member_name(m.linkname).split("/")))
+        if os.path.isabs(m.linkname) or m.linkname.startswith("/") or not _inside(real_root, linked):
+            raise RuntimeError(f"配布ファイルに不正なリンクがあります: {m.name} -> {m.linkname}")
+        if target.exists():
+            target.unlink()
+        if m.issym():
+            os.symlink(m.linkname, target)
+        else:
+            shutil.copy2(linked, target)
+        return
+    if not m.isfile():
+        return  # デバイスファイルなどは無視
+    src = tf.extractfile(m)
+    if src is None:
+        return
+    with src, open(target, "wb") as out:
+        shutil.copyfileobj(src, out, 1024 * 1024)
+    os.chmod(target, (m.mode & 0o755) | 0o600)  # 実行ファイルの実行権限を保つ
+
+
+def download_archive(
+    url: str,
+    dest: Path,
+    variant: str,
+    client: httpx.Client,
+    progress: Progress,
+    kind: str,
+    exe: str,
+    sha256: Optional[str] = None,
+    stop: Optional[threading.Event] = None,
+) -> Path:
+    """tar.gz / tar.zst の配布ファイルをダウンロードしながら展開し、必要なファイルだけを dest に書き出す。
+
+    sha256 を渡すと、ダウンロードしたファイル全体の sha256 と照らし合わせる（違えば RuntimeError）。
+    stop が立つと途中でやめる（DownloadCancelled）。実行ファイル（exe）のパスを返す。
+    """
+    tmp = dest.with_name(dest.name + ".part")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    root = tmp.resolve()
+    digest = hashlib.sha256()
+    try:
+        with client.stream("GET", url, follow_redirects=True) as r:
+            r.raise_for_status()
+            progress.total = int(r.headers.get("content-length") or 0)
+            progress.done = 0
+            raw = _DownloadReader(r.iter_bytes(1024 * 1024), digest, progress, stop)
+            stream = _decompressed(kind, io.BufferedReader(raw, 1024 * 1024))
+            with tarfile.open(fileobj=stream, mode="r|") as tf:
+                for m in tf:
+                    _extract_member(tf, m, root, variant)
+            raw.drain()
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    if sha256 and digest.hexdigest() != sha256.lower():
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise RuntimeError("ダウンロードした Ollama が壊れていました（sha256 が一致しません）。「再試行」でやり直してください")
+    if not (tmp / exe).exists():
+        raise RuntimeError(f"ダウンロードした配布ファイルに {exe} がありません")
+    (tmp / COMPLETE_MARK).write_text(url, encoding="utf-8")
+    if dest.exists():
+        shutil.rmtree(dest)
+    tmp.rename(dest)
+    progress.total = progress.total or progress.done
+    progress.done = progress.total
+    return dest / exe
+
+
+def fetch_sha256(client: httpx.Client, version: str, name: str) -> Optional[str]:
+    """公式リリースの sha256sum.txt から、配布ファイルの sha256 を得る（取れなければ None）。"""
+    try:
+        r = client.get(RELEASE_BASE.format(version=version) + SHA256_FILE, follow_redirects=True)
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        log.warning("Ollama の sha256sum.txt を取得できませんでした（確認せずに使います）: %s", e)
+        return None
+    for line in r.text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and PurePosixPath(parts[1]).name == name:
+            return parts[0].lower()
+    log.warning("sha256sum.txt に %s がありません（確認せずに使います）", name)
+    return None
+
+
 # ---------- モデル ----------
 def manifest_relpath(name: str) -> PurePosixPath:
     """'qwen3-vl:8b-instruct' → registry.ollama.ai/library/qwen3-vl/8b-instruct（Ollama のモデル置き場の中の場所）"""
@@ -230,6 +479,8 @@ def find_model_sources(models_dir: Path) -> list[Path]:
     if os.environ.get("OLLAMA_MODELS"):
         candidates.append(Path(os.environ["OLLAMA_MODELS"]))
     candidates.append(Path.home() / ".ollama" / "models")
+    if os_kind() == "linux":
+        candidates.extend(SYSTEM_MODEL_DIRS)
     out: list[Path] = []
     for c in candidates:
         try:
@@ -402,6 +653,27 @@ class _WinJob:
             self.handle = None
 
 
+# ---------- Linux: 親が終わったら Ollama も止める ----------
+@functools.lru_cache(maxsize=None)
+def _setpriv_has_pdeathsig(path: str) -> bool:
+    try:
+        out = subprocess.run([path, "--help"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "--pdeathsig" in out.stdout + out.stderr
+
+
+def with_parent_death_signal(command: list[str]) -> list[str]:
+    """アプリが異常終了しても Ollama が残らないよう、親が終わったら SIGTERM が届くようにする（Linux の setpriv）。
+
+    setpriv がない・古い（util-linux 2.33 未満）ときはそのまま。その場合も、次回の起動時に残った Ollama を使う。
+    """
+    setpriv = shutil.which("setpriv")
+    if not setpriv or not _setpriv_has_pdeathsig(setpriv):
+        return command
+    return [setpriv, "--pdeathsig", "TERM", "--", *command]
+
+
 # ---------- 本体 ----------
 def _friendly(e: BaseException) -> str:
     if isinstance(e, httpx.ConnectError):
@@ -458,6 +730,7 @@ class EmbeddedOllama:
         self._log_file = None
         self._adopted = False
         self._restarts: list[float] = []
+        self._stop_download = threading.Event()  # 止めるときに、裏で進んでいるダウンロードもやめさせる
 
     @property
     def bin_dir(self) -> Path:
@@ -483,10 +756,12 @@ class EmbeddedOllama:
         if self._task and not self._task.done():
             return
         self._restarts.clear()
+        self._stop_download.clear()
         self._set("preparing", "準備しています")
         self._task = asyncio.create_task(self._run(), name="embedded-ollama")
 
     async def stop(self) -> None:
+        self._stop_download.set()
         if self._task:
             self._task.cancel()
             try:
@@ -505,11 +780,6 @@ class EmbeddedOllama:
             if self._command is not None:
                 command = list(self._command)
             else:
-                if sys.platform != "win32":
-                    raise RuntimeError(
-                        "同梱の Ollama は Windows のみ対応です。.env で LLM_RUNTIME=external にして、"
-                        "別途インストールした Ollama を使ってください"
-                    )
                 command = [str(await self._prepare_runtime()), "serve"]
             await self._import_models()
             await self._start_process(command)
@@ -526,10 +796,11 @@ class EmbeddedOllama:
             self._set("error", _friendly(e))
 
     async def _prepare_runtime(self) -> Path:
-        exe = self.bin_dir / "ollama.exe"
+        asset = runtime_asset()  # この OS・CPU 用の配布ファイルがなければ RuntimeError
+        exe = self.bin_dir / asset.exe
         if (self.bin_dir / COMPLETE_MARK).exists() and exe.exists():
             return exe
-        url = RELEASE_URL.format(version=self.version, arch=windows_arch())
+        url = asset.url(self.version)
         progress = Progress()
         self._set("downloading", f"Ollama {self.version} をダウンロードしています", progress)
         log.info("Ollama %s（%s）を取り出します: %s", self.version, self.variant, url)
@@ -537,7 +808,12 @@ class EmbeddedOllama:
         def work() -> Path:
             timeout = httpx.Timeout(120.0, connect=15.0)
             with httpx.Client(transport=self._transport, timeout=timeout) as client:
-                return download_runtime(url, self.bin_dir, self.variant, client, progress)
+                if asset.kind == "zip":
+                    return download_runtime(url, self.bin_dir, self.variant, client, progress)
+                sha256 = fetch_sha256(client, self.version, asset.name)
+                return download_archive(
+                    url, self.bin_dir, self.variant, client, progress, asset.kind, asset.exe, sha256, self._stop_download
+                )
 
         exe = await asyncio.to_thread(work)
         log.info("Ollama を用意しました（%.1fMB）: %s", progress.total / 1e6, exe)
@@ -625,6 +901,8 @@ class EmbeddedOllama:
         kwargs: dict = {}
         if sys.platform == "win32":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW  # type: ignore[attr-defined]
+        elif os_kind() == "linux":
+            command = with_parent_death_signal(command)
         self._proc = subprocess.Popen(
             command,
             cwd=str(self.root),

@@ -90,7 +90,7 @@ async def test_sleep_guard_modes():
 
     off = SleepGuard("off", set_state=calls.append, on_ac_power=lambda: True)
     off.start()
-    assert off.status() == {"supported": True, "mode": "off", "active": False}
+    assert off.status() == {"supported": True, "mode": "off", "active": False, "method": "custom", "error": ""}
 
 
 # ---------- Google カレンダー ----------

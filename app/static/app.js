@@ -108,7 +108,7 @@ const APPS = { discord: "Discord", slack: "Slack", teams: "Teams", zoom: "Zoom",
 function appOf(ev) {
   if (ev.source === "manual") return "manual";
   if (ev.source !== "other" && APPS[ev.source]) return ev.source; // Discord Bot など
-  // Windows 通知は source_channel が「Discord サーバー #ch」「Slack: タイトル」の形
+  // PC の通知（Windows・Mac・Linux）は source_channel が「Discord サーバー #ch」「Slack: タイトル」の形
   const head = String(ev.source_channel || "").split(":")[0].toLowerCase();
   for (const key of ["discord", "slack", "teams", "zoom"]) if (head.includes(key)) return key;
   return /\bline\b/.test(head) ? "line" : "other";
@@ -488,11 +488,12 @@ function renderStatus() {
   const STATE = { connected: "接続中", listening: "監視中", connecting: "接続しています…", starting: "開始しています…", reconnecting: "再接続中…", error: "エラー", stopped: "停止" };
   const lightOf = (state) => (state === "connected" || state === "listening" ? "ok" : state === "error" ? "ng" : "wait");
 
-  const win = s.connectors.find((c) => c.name === "windows_notifications");
+  const win = s.connectors.find((c) => c.name === "notifications");
   if (win) {
-    const backend = { winrt: "通知API", database: "通知データベース" }[win.backend] || "";
+    const backend = { winrt: "通知API", database: "通知データベース", dbus: "D-Bus" }[win.backend] || "";
+    const osName = { windows: "Windows", macos: "Mac", linux: "Linux" }[win.os] || "PC";
     const extra = win.error ? ` — ${esc(win.error)}` : `（${esc(win.apps.join(", "))}${backend ? ` / ${backend}` : ""}）`;
-    items.push(`<span class="item"><span class="light ${lightOf(win.state)}"></span>Windows通知: ${STATE[win.state] || esc(win.state)}${extra}</span>`);
+    items.push(`<span class="item"><span class="light ${lightOf(win.state)}"></span>${osName}の通知: ${STATE[win.state] || esc(win.state)}${extra}</span>`);
   }
 
   const discord = s.connectors.find((c) => c.name === "discord");
@@ -527,8 +528,9 @@ function renderStatus() {
 
   const p = s.power || {};
   if (p.supported && p.mode && p.mode !== "off") {
-    const text = p.active ? "有効" : p.mode === "ac" ? "待機中（バッテリー駆動）" : "無効";
-    items.push(`<span class="item"><span class="light ${p.active ? "ok" : ""}"></span>スリープ防止: ${text}</span>`);
+    const text = p.error ? `使えません（${esc(p.error)}）` : p.active ? "有効" : p.mode === "ac" ? "待機中（バッテリー駆動）" : "無効";
+    const light = p.error ? "ng" : p.active ? "ok" : "";
+    items.push(`<span class="item"><span class="light ${light}"></span>スリープ防止: ${text}</span>`);
   }
   $("#statusbar").innerHTML = items.join("");
   updateAnalyzeNote();

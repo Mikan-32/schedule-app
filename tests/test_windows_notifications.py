@@ -1,4 +1,5 @@
-"""Windows 通知コネクタのテスト（Windows 以外でも動くよう、通知APIとDBは偽物を使う）。"""
+"""PC の通知コネクタと、Windows の読み取り方式のテスト（Windows 以外でも動くよう、通知APIとDBは偽物を使う）。"""
+import asyncio
 import sqlite3
 import sys
 import types
@@ -7,18 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from app.config import Settings
+from app.config import Settings, os_kind
 from app.connectors import build_connectors
-from app.connectors.windows_notifications import (
-    DatabaseSource,
+from app.connectors.notifications import (
+    NotificationConnector,
     NotificationSource,
     ToastNotification,
-    WindowsNotificationConnector,
+    parse_discord_title,
+    strip_invisible,
+)
+from app.connectors.windows_notifications import (
+    DatabaseSource,
     WinRTSource,
     filetime_to_datetime,
-    parse_discord_title,
     parse_toast_xml,
-    strip_invisible,
 )
 
 DISCORD_XML = """<toast launch="discord://"><visual><binding template="ToastGeneric">
@@ -114,7 +117,7 @@ def toast(key, texts, app="Discord", minutes_ago=0):
 
 async def test_connector_flow(env, future):
     service, extractor, sink, db = env
-    service.settings.windows_notify_apps = ["Discord"]
+    service.settings.notify_apps = ["Discord"]
     d = future(4)
     extractor.events = [{"title": "ゼミ", "date": d.isoformat(), "start_time": "15:00", "confidence": 0.9}]
     src = FakeSource([
@@ -122,7 +125,7 @@ async def test_connector_flow(env, future):
         toast("a", ["山田 (#連絡, 研究室)", "来週水曜15時からゼミです"]),
         toast("s", ["#general", "明日10時から"], app="Slack"),  # 対象外アプリ
     ])
-    conn = WindowsNotificationConnector(service.settings, service, sources=[src])
+    conn = NotificationConnector(service.settings, service, sources=[src])
     await conn.start()
     conn._task.cancel()  # ループは使わず poll_once を直接呼ぶ
     assert conn.status()["state"] == "listening" and conn.status()["backend"] == "winrt"
@@ -147,7 +150,7 @@ async def test_connector_falls_back(env, tmp_path):
     service, *_ = env
     db = tmp_path / "wpndatabase.db"
     make_db(db, [])
-    conn = WindowsNotificationConnector(service.settings, service, sources=[FakeSource(fail=True), DatabaseSource(db)])
+    conn = NotificationConnector(service.settings, service, sources=[FakeSource(fail=True), DatabaseSource(db)])
     await conn.start()
     assert conn.status()["backend"] == "database"
     await conn.stop()
@@ -155,17 +158,37 @@ async def test_connector_falls_back(env, tmp_path):
 
 async def test_connector_all_fail(env):
     service, *_ = env
-    conn = WindowsNotificationConnector(service.settings, service, sources=[FakeSource(fail=True)])
+    conn = NotificationConnector(service.settings, service, sources=[FakeSource(fail=True)])
     await conn.start()
     assert conn.status()["state"] == "error" and "denied" in conn.status()["error"]
+    await conn.stop()
+
+
+async def test_connector_retries_until_source_is_ready(env):
+    # Mac でフルディスクアクセスを許可した・Linux でデスクトップにログインしたなど、あとから使えるようになった場合
+    service, *_ = env
+    src = FakeSource([toast("a", ["山田 (#連絡, 研究室)", "来週水曜15時からゼミです"])], fail=True)
+    conn = NotificationConnector(service.settings, service, sources=[src])
+    conn.RETRY_SEC = 0.05
+    await conn.start()
+    assert conn.status()["state"] == "error"
+    src.fail = False
+    for _ in range(100):
+        if conn.status()["state"] == "listening":
+            break
+        await asyncio.sleep(0.02)
+    assert conn.status() == {**conn.status(), "state": "listening", "error": "", "backend": "winrt"}
+    await conn.stop()
 
 
 def test_build_connectors(env):
     service, _, _, _ = env
-    s = Settings(discord_token="", windows_notifications="true")
-    assert [c.name for c in build_connectors(s, service, service.notifier)] == ["windows_notifications"]
-    s = Settings(discord_token="", windows_notifications="auto")
-    expected = ["windows_notifications"] if sys.platform == "win32" else []
+    s = Settings(discord_token="", notifications="true")
+    assert [c.name for c in build_connectors(s, service, service.notifier)] == ["notifications"]
+    s = Settings(discord_token="", notifications="false")
+    assert build_connectors(s, service, service.notifier) == []
+    s = Settings(discord_token="", notifications="auto")
+    expected = ["notifications"] if os_kind() in ("windows", "macos", "linux") else []
     assert [c.name for c in build_connectors(s, service, service.notifier)] == expected
 
 

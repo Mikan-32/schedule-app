@@ -17,11 +17,11 @@ def build_connectors(settings: "Settings", service: "ScheduleService", notifier:
     """有効な連絡ツールのコネクタを生成する。"""
     connectors: list[Connector] = []
 
-    # Windows の通知を直接読み取る（Bot 不要。WINDOWS_NOTIFY_APPS で Slack 等も対象にできる）
-    if settings.windows_notifications_enabled:
-        from .windows_notifications import WindowsNotificationConnector
+    # PC の通知を直接読み取る（Bot 不要。Windows・macOS・Linux。NOTIFY_APPS で Slack 等も対象にできる）
+    if settings.notifications_enabled:
+        from .notifications import NotificationConnector
 
-        connectors.append(WindowsNotificationConnector(settings, service))
+        connectors.append(NotificationConnector(settings, service))
 
     # Discord Bot（チャンネルの精査 + 画像の精査 + DM 通知・確認ボタン）
     if settings.discord_enabled:

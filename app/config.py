@@ -14,21 +14,42 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
-def _bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None or value.strip() == "":
+def _get(name: str, *old_names: str, default: str = "") -> str:
+    """環境変数を読む。新しい名前が空なら、以前の名前（old_names）も見る（設定名を変えても .env がそのまま使える）。"""
+    for n in (name, *old_names):
+        value = os.getenv(n)
+        if value is not None and value.strip() != "":
+            return value
+    return default
+
+
+def _bool(name: str, default: bool, *old_names: str) -> bool:
+    value = _get(name, *old_names)
+    if value.strip() == "":
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _int(name: str, default: int) -> int:
-    value = os.getenv(name, "").strip()
+def _int(name: str, default: int, *old_names: str) -> int:
+    value = _get(name, *old_names).strip()
     return int(value) if value else default
 
 
-def _float(name: str, default: float) -> float:
-    value = os.getenv(name, "").strip()
+def _float(name: str, default: float, *old_names: str) -> float:
+    value = _get(name, *old_names).strip()
     return float(value) if value else default
+
+
+def os_kind(platform: Optional[str] = None) -> str:
+    """windows / macos / linux / other"""
+    p = platform or sys.platform
+    if p == "win32":
+        return "windows"
+    if p == "darwin":
+        return "macos"
+    if p.startswith("linux"):
+        return "linux"
+    return "other"
 
 
 def _id_list(name: str) -> list[int]:
@@ -45,7 +66,7 @@ class Settings:
     port: int = field(default_factory=lambda: _int("PORT", 8000))
 
     # --- ローカルLLM (Ollama) ---
-    # auto: Windows ではアプリに同梱の Ollama を使う（別途インストール不要）、それ以外は external
+    # auto: Windows・macOS・Linux ではアプリに同梱の Ollama を使う（別途インストール不要）、それ以外は external
     # embedded: 同梱の Ollama / external: 自分でインストールした Ollama（OLLAMA_BASE_URL）
     llm_runtime: str = field(default_factory=lambda: os.getenv("LLM_RUNTIME", "auto").strip().lower())
     ollama_base_url: str = field(default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/"))
@@ -54,7 +75,7 @@ class Settings:
     embedded_ollama_version: str = field(default_factory=lambda: os.getenv("EMBEDDED_OLLAMA_VERSION", "v0.40.2").strip())
     embedded_ollama_port: int = field(default_factory=lambda: _int("EMBEDDED_OLLAMA_PORT", 11435))
     embedded_model: str = field(default_factory=lambda: os.getenv("EMBEDDED_MODEL", "qwen3-vl:8b-instruct").strip())
-    # auto: NVIDIA のドライバーがあれば GPU 用のライブラリも取り出す / cpu / nvidia
+    # auto: NVIDIA のドライバーがあれば GPU 用のライブラリも取り出す / cpu / nvidia（Windows・Linux。Mac は常に同じもの）
     embedded_gpu: str = field(default_factory=lambda: os.getenv("EMBEDDED_GPU", "auto").strip().lower())
     # 別途インストールした Ollama に同じモデルがあれば取り込む（ダウンロードしなくて済む）
     embedded_import_models: bool = field(default_factory=lambda: _bool("EMBEDDED_IMPORT_MODELS", True))
@@ -90,20 +111,29 @@ class Settings:
     # false にすると Bot はサーバーのチャンネルを読まず、DM 通知の送信（とBotへのDM/転送の精査）だけを行う
     discord_read_channels: bool = field(default_factory=lambda: _bool("DISCORD_READ_CHANNELS", True))
 
-    # --- Windows 通知 (Bot 不要) ---
-    # auto: Windows なら有効 / true / false
-    windows_notifications: str = field(default_factory=lambda: os.getenv("WINDOWS_NOTIFICATIONS", "auto").strip().lower())
-    # 監視するアプリ（表示名または AppUserModelID の部分一致、カンマ区切り）
-    windows_notify_apps: list[str] = field(
-        default_factory=lambda: [a.strip() for a in os.getenv("WINDOWS_NOTIFY_APPS", "Discord").split(",") if a.strip()]
+    # --- PC の通知 (Bot 不要。Windows・macOS・Linux)。以前の名前 WINDOWS_NOTIFY_* もそのまま使える ---
+    # auto: Windows・macOS・Linux なら有効 / true / false
+    notifications: str = field(
+        default_factory=lambda: _get("NOTIFICATIONS", "WINDOWS_NOTIFICATIONS", default="auto").strip().lower()
     )
-    # auto: winrt を試して使えなければ database / winrt / database
-    windows_notify_backend: str = field(default_factory=lambda: os.getenv("WINDOWS_NOTIFY_BACKEND", "auto").strip().lower())
-    windows_notify_poll_sec: float = field(default_factory=lambda: _float("WINDOWS_NOTIFY_POLL_SEC", 2.0))
+    # 監視するアプリ（表示名・アプリID の部分一致、カンマ区切り）
+    notify_apps: list[str] = field(
+        default_factory=lambda: [
+            a.strip() for a in _get("NOTIFY_APPS", "WINDOWS_NOTIFY_APPS", default="Discord").split(",") if a.strip()
+        ]
+    )
+    # auto: OS ごとに使える方式を順に試す（Windows: winrt → database / macOS: database / Linux: dbus）
+    notify_backend: str = field(
+        default_factory=lambda: _get("NOTIFY_BACKEND", "WINDOWS_NOTIFY_BACKEND", default="auto").strip().lower()
+    )
+    notify_poll_sec: float = field(default_factory=lambda: _float("NOTIFY_POLL_SEC", 2.0, "WINDOWS_NOTIFY_POLL_SEC"))
     # 起動時に、直近何分以内の通知までさかのぼって精査するか
-    windows_notify_backfill_min: int = field(default_factory=lambda: _int("WINDOWS_NOTIFY_BACKFILL_MIN", 30))
-    windows_notify_db_path: Optional[Path] = field(
-        default_factory=lambda: Path(os.environ["WINDOWS_NOTIFY_DB_PATH"]) if os.getenv("WINDOWS_NOTIFY_DB_PATH") else None
+    notify_backfill_min: int = field(
+        default_factory=lambda: _int("NOTIFY_BACKFILL_MIN", 30, "WINDOWS_NOTIFY_BACKFILL_MIN")
+    )
+    # 通知データベースの場所（Windows・macOS。空なら OS の既定の場所）
+    notify_db_path: Optional[Path] = field(
+        default_factory=lambda: Path(p) if (p := _get("NOTIFY_DB_PATH", "WINDOWS_NOTIFY_DB_PATH").strip()) else None
     )
 
     # --- 文脈・自分宛ての判定 ---
@@ -134,7 +164,7 @@ class Settings:
     queue_retry_sec: float = field(default_factory=lambda: _float("QUEUE_RETRY_SEC", 60.0))
     # 接続以外のエラー（LLM の応答が壊れている等）で何回失敗したら諦めるか
     queue_max_attempts: int = field(default_factory=lambda: _int("QUEUE_MAX_ATTEMPTS", 3))
-    # アプリの実行中に PC がスリープしないようにする（Windows のみ）: off / ac（電源接続中だけ）/ always
+    # アプリの実行中に PC がスリープしないようにする（Windows・macOS・Linux）: off / ac（電源接続中だけ）/ always
     prevent_sleep: str = field(default_factory=lambda: os.getenv("PREVENT_SLEEP", "ac").strip().lower())
     log_file: Path = field(default_factory=lambda: BASE_DIR / os.getenv("LOG_FILE", "data/app.log"))
 
@@ -160,7 +190,7 @@ class Settings:
         """embedded（同梱の Ollama）または external（自分でインストールした Ollama）。"""
         if self.llm_runtime in ("embedded", "external"):
             return self.llm_runtime
-        return "embedded" if sys.platform == "win32" else "external"
+        return "embedded" if os_kind() in ("windows", "macos", "linux") else "external"
 
     @property
     def ollama_url(self) -> str:
@@ -180,10 +210,10 @@ class Settings:
         return self.google_calendar in {"1", "true", "yes", "on"}
 
     @property
-    def windows_notifications_enabled(self) -> bool:
-        if self.windows_notifications == "auto":
-            return sys.platform == "win32"
-        return self.windows_notifications in {"1", "true", "yes", "on"}
+    def notifications_enabled(self) -> bool:
+        if self.notifications == "auto":
+            return os_kind() in ("windows", "macos", "linux")
+        return self.notifications in {"1", "true", "yes", "on"}
 
 
 settings = Settings()

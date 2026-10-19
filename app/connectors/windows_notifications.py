@@ -1,59 +1,25 @@
-"""Windows の通知を直接読み取るコネクタ（Bot 不要）。
+"""Windows の通知の読み取り方式（app/connectors/notifications.py の NotificationConnector が使う）。
 
-Discord / Slack / Teams / LINE などのデスクトップアプリが出したトースト通知を読み取り、
-本文を精査して予定を登録する。
-
-読み取り方式（WINDOWS_NOTIFY_BACKEND）:
   - winrt    : Windows 公式の UserNotificationListener API（PyWinRT 経由）。初回にアクセス許可が必要
   - database : 通知センターのデータベース (wpndatabase.db) を読み取り専用で参照する
-  - auto     : winrt を試し、使えなければ database に切り替える（既定）
 
-制約: 通知に表示される文章しか取れない（画像の中身は不可・長文は途中で切れることがある）。
+NOTIFY_BACKEND=auto（既定）なら winrt を試し、使えなければ database に切り替える。
 """
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
-import re
 import shutil
 import sqlite3
 import tempfile
 import xml.etree.ElementTree as ET
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
-from ..llm import LLMUnavailable
-from ..models import IncomingMessage
-from .base import Connector
-
-if TYPE_CHECKING:
-    from ..config import Settings
-    from ..service import ScheduleService
-
-log = logging.getLogger(__name__)
+from .notifications import NotificationSource, ToastNotification
 
 _FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
-
-
-@dataclass
-class ToastNotification:
-    key: str  # 一意キー（重複処理防止用）
-    app_name: str  # 表示名 (例: Discord)。取れない場合は空
-    app_id: str  # AppUserModelID (例: com.squirrel.Discord.Discord)
-    texts: list[str]  # トーストのテキスト要素（先頭がタイトル）
-    created_at: datetime  # tz-aware
-
-    @property
-    def title(self) -> str:
-        return self.texts[0] if self.texts else ""
-
-    @property
-    def body(self) -> str:
-        return "\n".join(self.texts[1:])
 
 
 # ---------- 解析ヘルパ ----------
@@ -81,65 +47,7 @@ def filetime_to_datetime(value: int) -> datetime:
     return _FILETIME_EPOCH + timedelta(microseconds=int(value) // 10)
 
 
-_DISCORD_TITLE = re.compile(r"^(?P<author>.+?) \((?P<channel>#[^,]+), (?P<server>.+)\)$")
-# 見えない制御文字（双方向テキストの分離・ゼロ幅文字など）。Discord は名前やチャンネル名を U+2068…U+2069 で囲んで通知する
-_INVISIBLE = re.compile("[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]")
-
-
-def strip_invisible(text: str) -> str:
-    return _INVISIBLE.sub("", text or "")
-
-
-def parse_discord_title(title: str) -> tuple[str, str]:
-    """Discord の通知タイトル「ユーザー名 (#チャンネル, サーバー名)」を (送信者, チャンネル) に分解する。
-
-    サーバーのチャンネル以外（チャンネルが付いていないもの）は DM とみなす。
-    """
-    m = _DISCORD_TITLE.match(strip_invisible(title).strip())
-    if m:
-        return m["author"], f"{m['server']} {m['channel']}"
-    return strip_invisible(title).strip(), "DM"
-
-
-def match_app(toast: ToastNotification, targets: list[str]) -> Optional[str]:
-    """監視対象アプリならその名前を返す（表示名・AppUserModelID の部分一致、大文字小文字無視）。"""
-    hay = f"{toast.app_name} {toast.app_id}".lower()
-    for t in targets:
-        if t.lower() in hay:
-            return t
-    return None
-
-
-def to_incoming(toast: ToastNotification, app_label: str) -> IncomingMessage:
-    title, body = strip_invisible(toast.title), strip_invisible(toast.body)
-    if app_label.lower() == "discord":
-        author, channel = parse_discord_title(title)
-        channel = f"Discord {channel}"
-    else:
-        author, channel = "", f"{toast.app_name or app_label}: {title}"
-    return IncomingMessage(
-        source="winnotify",
-        message_id=toast.key,
-        text=body or title,
-        sent_at=toast.created_at,
-        author=author,
-        channel=channel,
-    )
-
-
 # ---------- 読み取り方式 ----------
-class NotificationSource(ABC):
-    name = "base"
-
-    @abstractmethod
-    async def open(self) -> None:
-        """使えない場合は例外を投げる。"""
-
-    @abstractmethod
-    async def fetch(self) -> list[ToastNotification]:
-        """現在の（または前回以降の）トースト通知を返す。"""
-
-
 class WinRTSource(NotificationSource):
     """UserNotificationListener (PyWinRT)。"""
 
@@ -251,114 +159,3 @@ class DatabaseSource(NotificationSource):
                 )
             )
         return result
-
-
-# ---------- コネクタ ----------
-class WindowsNotificationConnector(Connector):
-    name = "windows_notifications"
-
-    def __init__(self, settings: "Settings", service: "ScheduleService", sources: Optional[list[NotificationSource]] = None):
-        self.settings = settings
-        self.service = service
-        self.apps = settings.windows_notify_apps
-        self._candidates = sources
-        self.source: Optional[NotificationSource] = None
-        self.state = "stopped"
-        self.error = ""
-        self._seen: set[str] = set()
-        self._first_poll = True
-        self._task: Optional[asyncio.Task] = None
-        self._jobs: set[asyncio.Task] = set()
-
-    def _default_sources(self) -> list[NotificationSource]:
-        backend = self.settings.windows_notify_backend
-        db = DatabaseSource(self.settings.windows_notify_db_path)
-        if backend == "winrt":
-            return [WinRTSource()]
-        if backend == "database":
-            return [db]
-        return [WinRTSource(), db]
-
-    # ---------- lifecycle ----------
-    async def start(self) -> None:
-        self.state = "starting"
-        errors = []
-        for src in self._candidates or self._default_sources():
-            try:
-                await src.open()
-                self.source = src
-                break
-            except Exception as e:
-                errors.append(f"{src.name}: {e}")
-                log.warning("Windows通知 (%s) は使用できません: %s", src.name, e)
-        if self.source is None:
-            self.state, self.error = "error", " / ".join(errors)
-            log.error("Windows通知を読み取れません: %s", self.error)
-            return
-        self.state, self.error = "listening", ""
-        log.info("Windows通知の監視を開始しました（方式: %s, 対象: %s）", self.source.name, ", ".join(self.apps))
-        self._task = asyncio.create_task(self._loop(), name="windows-notifications")
-
-    async def stop(self) -> None:
-        if self._task:
-            self._task.cancel()
-        for job in list(self._jobs):
-            job.cancel()
-        self.state = "stopped"
-
-    def status(self) -> dict:
-        return {
-            "name": self.name,
-            "state": self.state,
-            "error": self.error,
-            "backend": self.source.name if self.source else None,
-            "apps": self.apps,
-        }
-
-    # ---------- 監視 ----------
-    async def _loop(self) -> None:
-        while True:
-            try:
-                await self.poll_once()
-                if self.state == "error":
-                    self.state, self.error = "listening", ""
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                self.state, self.error = "error", f"読み取りに失敗: {e}"
-                log.warning("Windows通知の読み取りに失敗: %s", e)
-            await asyncio.sleep(self.settings.windows_notify_poll_sec)
-
-    async def poll_once(self) -> list[IncomingMessage]:
-        """新しい通知を取得して精査に回す。精査に回したメッセージを返す。"""
-        toasts = await self.source.fetch()
-        now = datetime.now(timezone.utc)
-        backfill = timedelta(minutes=self.settings.windows_notify_backfill_min)
-        queued = []
-        for toast in toasts:
-            if toast.key in self._seen:
-                continue
-            # 起動直後は、直近 N 分以内の通知だけを対象にする
-            if self._first_poll and now - toast.created_at > backfill:
-                continue
-            app = match_app(toast, self.apps)
-            if not app or not toast.texts:
-                continue
-            msg = to_incoming(toast, app)
-            queued.append(msg)
-            job = asyncio.create_task(self._handle(msg))
-            self._jobs.add(job)
-            job.add_done_callback(self._jobs.discard)
-        # WinRT は「現在ある通知」を毎回返すので、見たキーを覚えておく（消えた通知は忘れてよい）
-        if self.source.name == "winrt":
-            self._seen = {t.key for t in toasts}
-        self._first_poll = False
-        return queued
-
-    async def _handle(self, msg: IncomingMessage) -> None:
-        try:
-            await self.service.handle_message(msg)
-        except LLMUnavailable as e:
-            log.error("ローカルLLMに接続できません: %s", e)
-        except Exception:
-            log.exception("通知の精査に失敗しました")
