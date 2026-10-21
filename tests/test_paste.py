@@ -105,7 +105,7 @@ def test_paste_validation(tmp_path: Path, monkeypatch):
     with _client(tmp_path, FakeLLM()) as c:
         assert c.post("/api/analyze/jobs", data={"text": "  "}).status_code == 400
         r = c.post("/api/analyze/jobs", files=[("images", ("a.txt", b"hello", "text/plain"))])
-        assert r.status_code == 400 and "画像ではない" in r.json()["detail"]
+        assert r.status_code == 400 and "画像・PDF ではない" in r.json()["detail"]
         five = [("images", (f"{i}.png", PNG, "image/png")) for i in range(5)]
         assert c.post("/api/analyze/jobs", files=five).status_code == 400
         monkeypatch.setattr(api, "MAX_PASTE_IMAGE_BYTES", 10)

@@ -29,6 +29,7 @@ from .models import (
 )
 from .formatting import format_event_line
 from .notifier import Notifier
+from .pdf_reader import PDF_MARK
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,8 @@ def is_paste(msg: IncomingMessage) -> bool:
 
 def _paste_label(msg: IncomingMessage) -> str:
     """通知に使う呼び名（「貼り付けた画像」など）。"""
+    if PDF_MARK in msg.text:
+        return "貼り付けた PDF"
     n = len(msg.images)
     if n == 0:
         return "貼り付けたメッセージ"

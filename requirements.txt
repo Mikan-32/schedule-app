@@ -6,6 +6,8 @@ python-dotenv>=1.0
 python-multipart>=0.0.9
 Pillow>=10.0
 tzdata>=2024.1
+# 貼り付けた PDF の文字の読み取り（pypdfium2 も一緒に入り、文字データのないページを画像にするのに使う）
+pdfplumber>=0.11
 # Windows 通知の読み取り（Windows のみインストールされる）
 winrt-runtime>=2.2; sys_platform == "win32"
 winrt-Windows.Foundation>=2.2; sys_platform == "win32"

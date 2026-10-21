@@ -672,22 +672,26 @@ $$("#sheet-tabs .segment").forEach((btn) => btn.addEventListener("click", (e) =>
 
 const RESULT_TAG = { added: "追加", pending: "確認待ち", duplicate: "登録済み", merged: "まとめた", updated: "変更", cancelled: "取り消し", change_pending: "確認待ち", skipped: "見送り" };
 
-// ---------- 貼り付け（文章・画像）→ 裏で解析 ----------
-// 画像は CPU だけの PC だと数分かかるので、送ったらすぐ次を貼れるようにし、結果はあとから表示する
-const MAX_IMAGES = 4;
+// ---------- 貼り付け（文章・画像・PDF）→ 裏で解析 ----------
+// 画像は GPU を使えない PC だと数分かかるので、送ったらすぐ次を貼れるようにし、結果はあとから表示する
+// PDF はサーバーで文字データを読み取る（シフト表などの表は日ごとに整理して LLM に渡す）
+const MAX_IMAGES = 4; // 画像・PDF 合わせて
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const PASTE_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘V" : "Ctrl+V";
-const paste = { images: [], jobs: [], timer: null }; // images: [{ file, url }] / jobs: 送った解析（新しい順）
+const paste = { images: [], jobs: [], timer: null }; // images: [{ file, url, pdf }] / jobs: 送った解析（新しい順）
+const isPdf = (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name || "");
+const isAttachable = (f) => f.type.startsWith("image/") || isPdf(f);
 
 const isActiveJob = (job) => job.state === "waiting" || job.state === "running";
 function releaseJob(job) { (job.urls || []).forEach((u) => URL.revokeObjectURL(u)); }
 
 function addImages(files) {
   let added = 0;
-  for (const file of [...files].filter((f) => f.type.startsWith("image/"))) {
-    if (paste.images.length >= MAX_IMAGES) { toast(`画像は${MAX_IMAGES}枚までです`); break; }
-    if (file.size > MAX_IMAGE_BYTES) { toast(`画像が大きすぎます（20MBまで）: ${file.name}`); continue; }
-    paste.images.push({ file, url: URL.createObjectURL(file) });
+  for (const file of [...files].filter(isAttachable)) {
+    if (paste.images.length >= MAX_IMAGES) { toast(`画像・PDF は合わせて${MAX_IMAGES}個までです`); break; }
+    if (file.size > MAX_IMAGE_BYTES) { toast(`ファイルが大きすぎます（20MBまで）: ${file.name}`); continue; }
+    const pdf = isPdf(file);
+    paste.images.push({ file, pdf, url: pdf ? "" : URL.createObjectURL(file) });
     added++;
   }
   renderThumbs();
@@ -696,7 +700,7 @@ function addImages(files) {
 
 function removeImage(index) {
   const [img] = paste.images.splice(index, 1);
-  if (img) URL.revokeObjectURL(img.url);
+  if (img?.url) URL.revokeObjectURL(img.url);
   renderThumbs();
 }
 
@@ -704,22 +708,30 @@ function renderThumbs() {
   const box = $("#thumbs");
   box.hidden = !paste.images.length;
   box.innerHTML = paste.images.map((img, i) => `
-    <div class="thumb"><img src="${img.url}" alt="${esc(img.file.name || "貼り付けた画像")}">
-      <button type="button" class="thumb-remove" data-remove-image="${i}" aria-label="この画像を外す" title="外す">×</button></div>`).join("");
+    <div class="thumb${img.pdf ? " pdf" : ""}" title="${esc(img.file.name || "")}">
+      ${img.pdf ? pdfTile(img.file.name) : `<img src="${img.url}" alt="${esc(img.file.name || "貼り付けた画像")}">`}
+      <button type="button" class="thumb-remove" data-remove-image="${i}" aria-label="外す" title="外す">×</button></div>`).join("");
+  const pdfs = paste.images.filter((img) => img.pdf).length;
+  const imgs = paste.images.length - pdfs;
+  const what = [imgs ? `画像 ${imgs}枚` : "", pdfs ? `PDF ${pdfs}個` : ""].filter(Boolean).join("・");
   $("#file-names").textContent = paste.images.length
-    ? `画像 ${paste.images.length}枚（あと${MAX_IMAGES - paste.images.length}枚）`
+    ? `${what}（あと${MAX_IMAGES - paste.images.length}個）`
     : `${PASTE_KEY}・ドラッグでも追加できます`;
   updateAnalyzeNote();
 }
 
+function pdfTile(name) {
+  return `<div class="pdf-tile"><span class="pdf-badge">PDF</span><span class="pdf-name">${esc(name || "")}</span></div>`;
+}
+
 function updateAnalyzeNote() {
   const llm = state.status?.llm;
-  const noVision = paste.images.length > 0 && llm?.available && !llm.vision_model;
+  const noVision = paste.images.some((img) => !img.pdf) && llm?.available && !llm.vision_model;
   const note = $("#analyze-note");
   note.classList.toggle("warn", !!noVision);
   note.textContent = noVision
     ? "今のローカルLLMは画像を読めないため、画像は精査されません（画像対応のモデルを入れてください）"
-    : "ローカルLLMで精査し、予定が見つかれば登録します。画像は数分かかることがあります（閉じても続きます）。";
+    : "ローカルLLMで精査し、予定が見つかれば登録します。シフト表などは PDF のまま貼ると正確に読めます。画像は時間がかかることがあります（閉じても続きます）。";
 }
 
 function elapsedLabel(since) {
@@ -753,9 +765,12 @@ function renderJobs() {
   if (!paste.jobs.length) { box.innerHTML = ""; return; }
   box.innerHTML = `<div class="group">${paste.jobs.map((job) => {
     const n = job.urls?.length || 0;
-    const title = job.text ? esc(job.text.split("\n")[0].slice(0, 60)) : n ? `画像${n > 1 ? ` ${n}枚` : ""}` : "貼り付けたメッセージ";
+    const pdfs = job.pdfs || [];
+    const title = job.text ? esc(job.text.split("\n")[0].slice(0, 60))
+      : pdfs.length ? esc(pdfs.join("、")) : n ? `画像${n > 1 ? ` ${n}枚` : ""}` : "貼り付けたメッセージ";
+    const thumbs = [...pdfs.map(() => `<div class="pdf-tile small"><span class="pdf-badge">PDF</span></div>`), ...(job.urls || []).map((u) => `<img src="${u}" alt="">`)];
     return `<div class="row job-row">
-      ${n ? `<div class="job-thumbs">${job.urls.map((u) => `<img src="${u}" alt="">`).join("")}</div>` : ""}
+      ${thumbs.length ? `<div class="job-thumbs">${thumbs.join("")}</div>` : ""}
       <div class="job-body"><div class="job-title">${title}</div><div class="job-status">${jobStatus(job)}</div></div>
       ${isActiveJob(job) ? "" : `<button type="button" class="text-button job-dismiss" data-dismiss-job="${esc(job.id)}" aria-label="結果を閉じる" title="閉じる">×</button>`}
     </div>`;
@@ -799,7 +814,7 @@ $("#analyze-form").addEventListener("submit", async (e) => {
   const form = e.target;
   const textarea = $("textarea", form);
   if (!textarea.value.trim() && !paste.images.length) {
-    toast("メッセージを入力するか、画像を貼り付けてください");
+    toast("メッセージを入力するか、画像・PDF を貼り付けてください");
     return;
   }
   const body = new FormData();
@@ -810,7 +825,12 @@ $("#analyze-form").addEventListener("submit", async (e) => {
   try {
     const job = await api("/api/analyze/jobs", { method: "POST", body });
     // 画像の URL は結果の表示に使うので、ここでは解放しない（結果を閉じたときに解放する）
-    paste.jobs.unshift({ ...job, urls: paste.images.map((img) => img.url), text: textarea.value.trim() });
+    paste.jobs.unshift({
+      ...job,
+      urls: paste.images.filter((img) => !img.pdf).map((img) => img.url),
+      pdfs: paste.images.filter((img) => img.pdf).map((img) => img.file.name || "PDF"),
+      text: textarea.value.trim(),
+    });
     paste.images = [];
     form.reset();
     renderThumbs();
@@ -824,16 +844,16 @@ $("#analyze-form").addEventListener("submit", async (e) => {
   }
 });
 
-// どの画面でも Ctrl+V で画像を貼り付けたら、解析シートを開いて追加する
+// どの画面でも Ctrl+V で画像・PDF を貼り付けたら、解析シートを開いて追加する
 const isEditable = (el) => !!el?.closest?.("input, textarea, select, [contenteditable]");
 document.addEventListener("paste", (e) => {
   if (!$("#settings-sheet").hidden) return; // 登録の基準を編集中は、解析シートを開かない
-  const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith("image/"));
+  const files = [...(e.clipboardData?.files || [])].filter(isAttachable);
   if (files.length) {
     e.preventDefault();
     openSheet("analyze");
     const n = addImages(files);
-    if (n) toast(n > 1 ? `画像を${n}枚追加しました` : "画像を追加しました");
+    if (n) toast(addedMessage(files.slice(0, n)));
     return;
   }
   // シートを閉じているときに文章を貼り付けたら、解析シートを開いて本文に入れる
@@ -847,7 +867,12 @@ document.addEventListener("paste", (e) => {
   }
 });
 
-// 画像ファイルを画面にドラッグ＆ドロップしても追加できる
+function addedMessage(files) {
+  const what = files.every(isPdf) ? "PDF" : files.some(isPdf) ? "画像・PDF" : "画像";
+  return files.length > 1 ? `${what}を${files.length}個追加しました` : `${what}を追加しました`;
+}
+
+// 画像・PDF のファイルを画面にドラッグ＆ドロップしても追加できる
 let dragDepth = 0;
 const draggingFiles = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
 document.addEventListener("dragenter", (e) => {
@@ -871,10 +896,10 @@ document.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   $("#drop-overlay").hidden = true;
-  const images = [...e.dataTransfer.files].filter((f) => f.type.startsWith("image/"));
-  if (!images.length) { toast("画像ファイルをドロップしてください"); return; }
+  const files = [...e.dataTransfer.files].filter(isAttachable);
+  if (!files.length) { toast("画像か PDF のファイルをドロップしてください"); return; }
   openSheet("analyze");
-  addImages(images);
+  addImages(files);
 });
 
 $("#manual-form").addEventListener("submit", async (e) => {

@@ -7,6 +7,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -15,6 +16,7 @@ from ..gcal import GoogleAuthError
 from ..holidays import holidays_between
 from ..llm import LLMUnavailable
 from ..models import Event, ImageInput, IncomingMessage
+from ..pdf_reader import PdfError, PdfUnavailable, read_pdf
 from ..service import _parse_time
 
 router = APIRouter(prefix="/api")
@@ -282,29 +284,56 @@ async def analyze(request: Request, text: str = Form(""), images: list[UploadFil
 
 @router.post("/analyze/jobs", status_code=202)
 async def submit_analyze_job(request: Request, text: str = Form(""), images: list[UploadFile] = File(default=[])):
-    """貼り付けたメッセージ・画像を受け付け、裏で精査する（結果は GET /api/analyze/jobs/{id} と通知タブ）。
+    """貼り付けたメッセージ・画像・PDF を受け付け、裏で精査する（結果は GET /api/analyze/jobs/{id} と通知タブ）。
 
-    画像は CPU だけの PC だと数分かかるので、/api/analyze のように終わるまで待たせない。
+    画像は GPU を使えない PC だと数分かかるので、/api/analyze のように終わるまで待たせない。
     ローカルLLM の準備中でも受け付け、つながったら精査する。
+    images には PDF も入れられる。PDF の文字データを読み取って本文に足し（カレンダー形式の表は日ごとに整理）、
+    文字データのないページ（スキャンした PDF など）は画像にする。
     """
     ctx = _ctx(request)
     if len(images) > MAX_PASTE_IMAGES:
-        raise HTTPException(400, f"画像は {MAX_PASTE_IMAGES} 枚までです")
-    imgs = []
+        raise HTTPException(400, f"画像・PDF は合わせて {MAX_PASTE_IMAGES} 個までです")
+    imgs, pdf_texts = [], []
     for f in images:
-        if not (f.content_type or "").startswith("image/"):
-            raise HTTPException(400, f"画像ではないファイルです: {f.filename or '（名前なし）'}")
+        name = f.filename or "（名前なし）"
+        pdf = _is_pdf(f)
+        if not pdf and not (f.content_type or "").startswith("image/"):
+            raise HTTPException(400, f"画像・PDF ではないファイルです: {name}")
         data = await f.read(MAX_PASTE_IMAGE_BYTES + 1)
         if len(data) > MAX_PASTE_IMAGE_BYTES:
-            raise HTTPException(413, f"画像が大きすぎます（{MAX_PASTE_IMAGE_BYTES // 1024 // 1024}MB まで）: {f.filename or '（名前なし）'}")
-        if data:
+            raise HTTPException(413, f"ファイルが大きすぎます（{MAX_PASTE_IMAGE_BYTES // 1024 // 1024}MB まで）: {name}")
+        if not data:
+            continue
+        if not pdf:
             imgs.append(ImageInput(data=data, mime=f.content_type, filename=f.filename or ""))
-    if not text.strip() and not imgs:
-        raise HTTPException(400, "メッセージまたは画像を入力してください")
-    job_id = ctx.service.submit_paste(text, imgs)
+            continue
+        try:
+            content = await run_in_threadpool(read_pdf, data, f.filename or "", list(ctx.settings.my_names))
+        except PdfUnavailable as e:
+            raise HTTPException(501, str(e))
+        except PdfError as e:
+            raise HTTPException(400, f"{name}: {e}")
+        except Exception as e:
+            raise HTTPException(400, f"PDF を読み取れませんでした: {name}（{e}）")
+        if not content.text and not content.images:
+            raise HTTPException(400, f"PDF から文字も画像も取り出せませんでした: {name}")
+        if content.text:
+            pdf_texts.append(content.text)
+        imgs.extend(content.images)
+    if len(imgs) > MAX_PASTE_IMAGES:
+        raise HTTPException(400, f"画像（PDF の文字データのないページを含む）は {MAX_PASTE_IMAGES} 枚までです")
+    body = "\n\n".join(t for t in (text.strip(), *pdf_texts) if t)
+    if not body and not imgs:
+        raise HTTPException(400, "メッセージ・画像・PDF のどれかを入れてください")
+    job_id = ctx.service.submit_paste(body, imgs)
     if ctx.queue_task:
         ctx.queue_task.kick()
     return ctx.service.paste_status(job_id)
+
+
+def _is_pdf(f: UploadFile) -> bool:
+    return (f.content_type or "").lower() == "application/pdf" or (f.filename or "").lower().endswith(".pdf")
 
 
 @router.get("/analyze/jobs")
