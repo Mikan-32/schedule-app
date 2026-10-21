@@ -86,6 +86,9 @@ class Settings:
     llm_timeout: float = field(default_factory=lambda: _float("LLM_TIMEOUT", 300.0))
     # 画像付きの精査の待ち時間（秒）。CPU だけの PC だと画像 1 枚で 3〜4 分かかるため長めにする
     llm_image_timeout: float = field(default_factory=lambda: _float("LLM_IMAGE_TIMEOUT", 900.0))
+    # ローカルLLM が一度に読める長さ（トークン）。Ollama の既定（GPU のメモリが 24GB 未満なら 4096）だと、
+    # 画像付きのプロンプト（画像 1 枚で約 3,600）が大きな画像・複数枚で入りきらないため広げる
+    llm_num_ctx: int = field(default_factory=lambda: _int("LLM_NUM_CTX", 8192))
     min_confidence: float = field(default_factory=lambda: _float("MIN_CONFIDENCE", 0.5))
     # 日付・時刻らしき表現がないテキストはLLMに送らない（負荷軽減）
     prefilter: bool = field(default_factory=lambda: _bool("PREFILTER", True))

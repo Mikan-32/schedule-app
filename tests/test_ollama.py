@@ -98,6 +98,8 @@ async def test_selection_and_extract_with_image():
     payload = captured[0]
     assert payload["format"]["required"] == ["events"]
     assert payload["think"] is False and payload["options"]["temperature"] == 0
+    # Ollama の既定（4096）では大きな画像が入りきらないので広げる。毎回同じ値（変わるとモデルを読み込み直す）
+    assert payload["options"]["num_ctx"] == 8192
     assert len(payload["messages"][1]["images"]) == 1
     assert "2026-10-14(水) 来週" in payload["messages"][1]["content"]
     await client.aclose()

@@ -97,6 +97,11 @@ cp .env.example .env        # 中身を編集
    Linux で公式のインストーラーを使った場合の `/usr/share/ollama/.ollama/models` も探します）
 3. なければ `qwen3-vl:8b-instruct`（画像対応・日本語OK、約 6GB）をダウンロードする
 
+NVIDIA の GPU がない PC でも、**内蔵 GPU（Intel Arc・Radeon の内蔵など）があれば Vulkan で使います**
+（Ollama は内蔵 GPU を既定では使わないので、アプリが `OLLAMA_IGPU_ENABLE=1` を付けて起動します）。
+Intel Core Ultra 7 258V（Arc 140V）では、CPU だけのときより文章 1 件 約 140 秒 → 約 20 秒、画像 1 枚 約 210 秒 → 約 50 秒になりました。
+内蔵 GPU で遅くなる・結果がおかしくなる場合は `.env` で `EMBEDDED_GPU=cpu` にすると CPU だけで動かします。
+
 2 回目以降はすぐに起動します。同梱の Ollama はアプリと一緒に起動・終了し、ポート `11435` を使うので、
 別途インストールした Ollama（`11434`）とはぶつかりません。用意ができたら、別途インストールした Ollama はアンインストールしてかまいません。
 
@@ -309,7 +314,7 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 - Web UI の「＋」から、メッセージの貼り付け解析や手動入力もできます。
   - 画像（チラシ・お知らせのスクリーンショットなど）は、Discord などで「画像をコピー」して Web UI で **Ctrl+V**（Mac は **⌘V**）すると追加できます（シートを開いていなくても可）。
     画像ファイルのドラッグ＆ドロップや「画像を選択」でも追加できます（1 回 4 枚、1 枚 20MB まで）。
-  - 解析は裏で進むので、終わるのを待たずに次を貼り付けたり、シートを閉じたりできます。CPU だけの PC だと画像 1 枚で 3〜4 分かかります。
+  - 解析は裏で進むので、終わるのを待たずに次を貼り付けたり、シートを閉じたりできます。GPU を使えない PC だと画像 1 枚で 3〜4 分かかります（内蔵 GPU を使えれば 1 分弱）。
     結果はシートと「通知」タブに出ます（予定が見つからなかったとき・登録済みだったときも「通知」に残ります）。
     ローカルLLM の準備中に貼り付けても消えず、つながったら精査します。
   - 日付は貼り付けた日時を基準に読むので、「明日」のような相対的な表現を含む前の日のメッセージは、日付がずれることがあります。
@@ -337,14 +342,15 @@ Windows の **コントロール パネル → 電源オプション → カバ�
 | `EMBEDDED_OLLAMA_VERSION` | `v0.40.2` | 同梱の Ollama のバージョン（変えると次回起動時に入れ替え） |
 | `EMBEDDED_OLLAMA_PORT` | `11435` | 同梱の Ollama のポート |
 | `EMBEDDED_MODEL` | `qwen3-vl:8b-instruct` | 同梱の Ollama にモデルがないとき、最初に用意するモデル |
-| `EMBEDDED_GPU` | `auto` | `auto`=NVIDIA のドライバーがあれば GPU 用のライブラリも用意 / `cpu` / `nvidia`（Windows・Linux。Mac は Apple シリコンなら自動で GPU を使う） |
+| `EMBEDDED_GPU` | `auto` | `auto`=NVIDIA のドライバーがあれば GPU 用のライブラリも用意し、なければ内蔵 GPU（Vulkan）を使う / `cpu`=GPU を使わない / `nvidia`（Windows・Linux。Mac は Apple シリコンなら自動で GPU を使う） |
 | `EMBEDDED_IMPORT_MODELS` | `true` | 別途インストールした Ollama に同じモデルがあれば取り込む |
 | `EMBEDDED_OLLAMA_DIR` | `data/ollama` | 同梱の Ollama の実行ファイル・モデル・ログ（`server.log`）の置き場 |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | `LLM_RUNTIME=external` のときの接続先 |
 | `OLLAMA_MODEL` / `OLLAMA_VISION_MODEL` | `auto` | モデルを固定したい場合に指定 |
 | `LLM_THINK` | `false` | 思考モード（対応モデルのみ） |
 | `LLM_TIMEOUT` | `300` | ローカルLLM の応答を待つ時間（秒） |
-| `LLM_IMAGE_TIMEOUT` | `900` | 画像付きのときに待つ時間（秒）。CPU だけの PC だと画像 1 枚で 3〜4 分かかる |
+| `LLM_IMAGE_TIMEOUT` | `900` | 画像付きのときに待つ時間（秒）。GPU を使えない PC だと画像 1 枚で 3〜4 分かかる |
+| `LLM_NUM_CTX` | `8192` | ローカルLLM が一度に読める長さ（トークン）。画像 1 枚のプロンプトで約 3,600 |
 | `MIN_CONFIDENCE` | `0.5` | これ未満の確信度の予定は登録しない |
 | `PREFILTER` | `true` | 日付・時刻らしき表現がない文章は LLM に送らない |
 | `CONFLICT_MODE` | `overlap` | `overlap`=時間帯が重なるとき確認 / `same_day`=同日に予定があれば常に確認 |

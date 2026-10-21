@@ -548,3 +548,25 @@ def test_parent_death_signal_wrapper(monkeypatch):
     assert rt.with_parent_death_signal(["ollama", "serve"]) == ["/usr/bin/setpriv", "--pdeathsig", "TERM", "--", "ollama", "serve"]
     monkeypatch.setattr(rt, "_setpriv_has_pdeathsig", lambda path: False)  # 古い setpriv
     assert rt.with_parent_death_signal(["ollama", "serve"]) == ["ollama", "serve"]
+
+
+@pytest.mark.parametrize(
+    "os_name, setting, variant, expected",
+    [
+        # NVIDIA の GPU がない PC は、内蔵 GPU（Intel Arc など）を Vulkan で使う（Ollama は既定では使わない）
+        ("windows", "auto", "cpu", {"OLLAMA_IGPU_ENABLE": "1"}),
+        ("linux", "auto", "cpu", {"OLLAMA_IGPU_ENABLE": "1"}),
+        # NVIDIA の GPU を使うときは内蔵 GPU に分けない
+        ("windows", "auto", "nvidia", {}),
+        ("windows", "nvidia", "nvidia", {}),
+        # EMBEDDED_GPU=cpu なら GPU を使わない
+        ("windows", "cpu", "cpu", {"OLLAMA_VULKAN": "0"}),
+        ("linux", "CPU", "cpu", {"OLLAMA_VULKAN": "0"}),
+        # Mac は Metal（Apple シリコン）か CPU（Intel）。何もしない
+        ("macos", "auto", "metal", {}),
+        ("macos", "cpu", "cpu", {}),
+    ],
+)
+def test_gpu_env(monkeypatch, os_name, setting, variant, expected):
+    monkeypatch.setattr(rt, "os_kind", lambda: os_name)
+    assert rt.gpu_env(setting, variant) == expected

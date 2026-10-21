@@ -281,7 +281,8 @@ class OllamaClient:
             "messages": [{"role": "system", "content": SYSTEM_PROMPT}, user_msg],
             "stream": False,
             "format": EXTRACTION_SCHEMA,
-            "options": {"temperature": 0},
+            # num_ctx は毎回同じ値にする（変わると Ollama がモデルを読み込み直す）
+            "options": {"temperature": 0, "num_ctx": self.settings.llm_num_ctx},
             "keep_alive": "15m",
         }
         try:
