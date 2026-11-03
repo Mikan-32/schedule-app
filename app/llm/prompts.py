@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+import re
+import unicodedata
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from ..formatting import WEEKDAYS_JA
@@ -124,6 +126,88 @@ def format_context(context: Optional[list[ContextMessage]], tz) -> str:
     return "\n".join(lines)
 
 
+# ---------- 日時の手がかり（「予定なし」と答えたときの聞き直し用） ----------
+# 小さいローカルLLM は「13日16:30から理容室」「11/13 16:30 理容室」のような短いメモ書きを、
+# 言い回しが少し違うだけで「予定なし」と答えることがある（2026-11 実機の qwen3-vl:8b-instruct）。
+# 本文に日付と時刻がはっきり書かれているのに予定なしと答えたときは、プログラムで読み取った日時を添えて聞き直す。
+_NUM_DATE = re.compile(r"(?<![\d/.])(?:(\d{4})[/年.-])?(\d{1,2})(?:/|月)(\d{1,2})日?(?![\d/])")
+_DAY_ONLY = re.compile(r"(?<![\d/.月])(\d{1,2})日(?!間|前|後|ぶり|振り|目|分|ほど|くらい|ぐらい)")
+_RELATIVE_DAYS = {"今日": 0, "本日": 0, "明日": 1, "あした": 1, "明後日": 2, "あさって": 2}
+_RELATIVE = re.compile("|".join(sorted(_RELATIVE_DAYS, key=len, reverse=True)))
+_TIME = re.compile(r"(午前|午後)?(\d{1,2})(?::(\d{2})|時(?![間限])(?:(半)|(\d{1,2})分)?)")
+RECENT_PAST_DAYS = 90  # 年のない「10/30」が基準日の少し前なら、過去の話とみなす（来年の日付にしない）
+
+
+def _valid_date(y: int, m: int, d: int) -> Optional[date]:
+    try:
+        return date(y, m, d)
+    except ValueError:
+        return None
+
+
+def _resolve_date(y: Optional[str], m: Optional[str], d: str, base: date) -> Optional[date]:
+    """本文の日付を、基準日をもとに YYYY-MM-DD にする。過去の日付・ありえない日付は None。"""
+    day = int(d)
+    if m is None:  # 「13日」だけ → 今月、過ぎていれば来月（31日のない月は飛ばす）
+        y0, m0 = base.year, base.month
+        for _ in range(3):
+            got = _valid_date(y0, m0, day)
+            if got and got >= base:
+                return got
+            y0, m0 = (y0 + 1, 1) if m0 == 12 else (y0, m0 + 1)
+        return None
+    if y is not None:
+        got = _valid_date(int(y), int(m), day)
+        return got if got and got >= base else None
+    got = _valid_date(base.year, int(m), day)
+    if got is None:
+        return None
+    if got >= base:
+        return got
+    if (base - got).days <= RECENT_PAST_DAYS:
+        return None
+    return _valid_date(base.year + 1, int(m), day)
+
+
+def datetime_hint(text: str, base: datetime) -> str:
+    """本文にある今日以降の日付と時刻。両方そろっていなければ ""。"""
+    t = unicodedata.normalize("NFKC", text)
+    today = base.date()
+    dates: list[str] = []
+    taken: list[tuple[int, int]] = []
+    for m in _NUM_DATE.finditer(t):
+        taken.append(m.span())
+        got = _resolve_date(m.group(1), m.group(2), m.group(3), today)
+        if got:
+            dates.append(f"「{m.group(0)}」= {got.isoformat()}({WEEKDAYS_JA[got.weekday()]})")
+    for m in _DAY_ONLY.finditer(t):
+        if any(s <= m.start() < e for s, e in taken):
+            continue
+        got = _resolve_date(None, None, m.group(1), today)
+        if got:
+            dates.append(f"「{m.group(0)}」= {got.isoformat()}({WEEKDAYS_JA[got.weekday()]})")
+    for m in _RELATIVE.finditer(t):
+        got = today + timedelta(days=_RELATIVE_DAYS[m.group(0)])
+        dates.append(f"「{m.group(0)}」= {got.isoformat()}({WEEKDAYS_JA[got.weekday()]})")
+    times: list[str] = []
+    for m in _TIME.finditer(t):
+        hour = int(m.group(2))
+        minute = int(m.group(3) or m.group(5) or (30 if m.group(4) else 0))
+        if m.group(1) == "午後" and hour < 12:
+            hour += 12
+        if hour > 24 or minute > 59:
+            continue
+        times.append(f"「{m.group(0)}」= {hour:02d}:{minute:02d}")
+    dates, times = list(dict.fromkeys(dates))[:3], list(dict.fromkeys(times))[:3]
+    if not dates or not times:
+        return ""
+    return (
+        "本文に次の日付・時刻が書かれています（プログラムで読み取ったもの）: " + "、".join(dates + times) + "\n"
+        "用事・予約・約束・締切などの予定なら、「5日10時 歯医者」のような短いメモ書きでも抽出してください。"
+        "過去の出来事の報告・雑談・仮定の話・まだ決まっていない候補日なら、events は [] のままにしてください。"
+    )
+
+
 def build_user_prompt(
     text: str,
     sent_at: datetime,
@@ -135,6 +219,7 @@ def build_user_prompt(
     reply_to: str = "",
     my_names: Optional[list[str]] = None,
     my_groups: Optional[list[str]] = None,
+    hint: str = "",
 ) -> str:
     base = f"{sent_at.strftime('%Y-%m-%d')}({WEEKDAYS_JA[sent_at.weekday()]}) {sent_at.strftime('%H:%M')}"
     names = " / ".join(my_names or [])
@@ -165,6 +250,8 @@ def build_user_prompt(
         body = "（本文なし。添付画像に書かれている内容を本文として読み取る）"
     else:
         body = "（本文なし）"
+    if hint:
+        parts.append("【日時の手がかり】\n" + hint)
     parts.append("【メッセージ本文】\n" + body)
     parts.append("上記から予定を抽出し、JSONで出力してください。")
     return "\n\n".join(parts)

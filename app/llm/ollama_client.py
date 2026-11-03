@@ -20,7 +20,8 @@ import httpx
 
 from ..config import Settings
 from ..models import EXTRACTION_SCHEMA, ContextMessage, Event, ExtractionResult, ImageInput
-from .prompts import SYSTEM_PROMPT, build_user_prompt
+from ..pdf_reader import PDF_MARK
+from .prompts import SYSTEM_PROMPT, build_user_prompt, datetime_hint
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +51,11 @@ LATEST_ALIASES: dict[str, str] = {
     "gemma3:latest": "gemma3:4b",
     "qwen3:latest": "qwen3:8b",
 }
+
+
+# 「予定なし」と答えたときに日時の手がかりを添えて聞き直すのは、この長さまでの文章だけ
+# （聞き直しが効くのは短いメモ書き。長い文章・PDF は時間がかかるうえ、日付と時刻がたいてい含まれる）
+RECHECK_MAX_CHARS = 300
 
 
 class LLMUnavailable(RuntimeError):
@@ -266,13 +272,13 @@ class OllamaClient:
                 log.warning("画像対応モデルがないため、画像を無視してテキストのみ精査します")
                 images = []
 
-        user_msg: dict = {
-            "role": "user",
-            "content": build_user_prompt(
+        def prompt(hint: str = "") -> str:
+            return build_user_prompt(
                 text, sent_at, author, channel, len(images), existing, context, reply_to,
-                self.settings.my_names, self.settings.my_groups,
-            ),
-        }
+                self.settings.my_names, self.settings.my_groups, hint,
+            )
+
+        user_msg: dict = {"role": "user", "content": prompt()}
         if images:
             user_msg["images"] = [prepare_image(img, self.settings.max_image_side) for img in images]
 
@@ -293,23 +299,48 @@ class OllamaClient:
 
         # 画像付きは時間がかかる（CPU だけの PC だと 1 枚で 3〜4 分）ので、待ち時間を分ける
         wait = self.settings.llm_image_timeout if images else self.settings.llm_timeout
-        last_error: Exception | None = None
         async with self._busy:
-            for attempt in range(2):
-                try:
-                    r = await self._client.post("/api/chat", json=payload, timeout=httpx.Timeout(wait, connect=5.0))
-                    r.raise_for_status()
-                    content = r.json()["message"]["content"]
-                    return ExtractionResult.model_validate(_parse_json(content))
-                except (httpx.ConnectError, httpx.ConnectTimeout) as e:
-                    self.selection = ModelSelection(error=str(e))
-                    raise LLMUnavailable(f"Ollama に接続できません: {e}") from e
-                except httpx.TimeoutException as e:
-                    # 同じ内容でやり直しても同じだけかかるので、ここではやり直さない（再精査キューに任せる）
-                    raise RuntimeError(f"ローカルLLM の応答が {wait:.0f} 秒以内に返りませんでした") from e
-                except Exception as e:
-                    last_error = e
-                    log.warning("LLM応答の解析に失敗 (試行%d): %s", attempt + 1, e)
+            result = await self._chat(payload, wait)
+            hint = self._recheck_hint(result, text, sent_at, images)
+            if not hint:
+                return result
+            log.info("予定なしと判定されましたが、日付と時刻が書かれているため聞き直します: %s", " ".join(text.split())[:60])
+            retry = {**payload, "messages": [payload["messages"][0], {**user_msg, "content": prompt(hint)}]}
+            try:
+                return await self._chat(retry, wait)
+            except LLMUnavailable:
+                raise
+            except Exception as e:  # 聞き直しに失敗しても、1 回目の答え（予定なし）は出ている
+                log.warning("聞き直しに失敗しました: %s", e)
+                return result
+
+    def _recheck_hint(
+        self, result: ExtractionResult, text: str, sent_at: datetime, images: list[ImageInput]
+    ) -> str:
+        """1 回目が「予定なし」で、短い文章に今日以降の日付と時刻があれば、聞き直しに添える手がかり。"""
+        if result.events or images or not self.settings.llm_recheck:
+            return ""
+        if PDF_MARK in text or len(text.strip()) > RECHECK_MAX_CHARS:
+            return ""
+        return datetime_hint(text, sent_at)
+
+    async def _chat(self, payload: dict, wait: float) -> ExtractionResult:
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                r = await self._client.post("/api/chat", json=payload, timeout=httpx.Timeout(wait, connect=5.0))
+                r.raise_for_status()
+                content = r.json()["message"]["content"]
+                return ExtractionResult.model_validate(_parse_json(content))
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+                self.selection = ModelSelection(error=str(e))
+                raise LLMUnavailable(f"Ollama に接続できません: {e}") from e
+            except httpx.TimeoutException as e:
+                # 同じ内容でやり直しても同じだけかかるので、ここではやり直さない（再精査キューに任せる）
+                raise RuntimeError(f"ローカルLLM の応答が {wait:.0f} 秒以内に返りませんでした") from e
+            except Exception as e:
+                last_error = e
+                log.warning("LLM応答の解析に失敗 (試行%d): %s", attempt + 1, e)
         raise RuntimeError(f"LLMからの抽出に失敗しました: {last_error}")
 
     def status(self) -> dict:
