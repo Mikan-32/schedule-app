@@ -131,7 +131,13 @@ def format_context(context: Optional[list[ContextMessage]], tz) -> str:
 # 言い回しが少し違うだけで「予定なし」と答えることがある（2026-11 実機の qwen3-vl:8b-instruct）。
 # 本文に日付と時刻がはっきり書かれているのに予定なしと答えたときは、プログラムで読み取った日時を添えて聞き直す。
 _NUM_DATE = re.compile(r"(?<![\d/.])(?:(\d{4})[/年.-])?(\d{1,2})(?:/|月)(\d{1,2})日?(?![\d/])")
-_DAY_ONLY = re.compile(r"(?<![\d/.月])(\d{1,2})日(?!間|前|後|ぶり|振り|目|分|ほど|くらい|ぐらい)")
+# 「2026-11-13」「2026.11.13」（- と . の区切りは年があるときだけ。「3-2」「1.5」のような数字を日付にしない）
+_ISO_DATE = re.compile(r"(?<![\d/.-])(\d{4})[.-](\d{1,2})[.-](\d{1,2})(?![\d.-])")
+# 「第2日曜日」「1日1回」「3日以内」「1日おき」などの「N日」は日付ではない（「13日中に」は締切なので日付として読む）
+_DAY_ONLY = re.compile(
+    r"(?<![\d/.月第])(\d{1,2})日"
+    r"(?!間|前|後|ぶり|振り|目|分|ほど|くらい|ぐらい|以内|以上|おき|置き|連続|あたり|当たり|曜|\d+回)"
+)
 _RELATIVE_DAYS = {"今日": 0, "本日": 0, "明日": 1, "あした": 1, "明後日": 2, "あさって": 2}
 _RELATIVE = re.compile("|".join(sorted(_RELATIVE_DAYS, key=len, reverse=True)))
 _TIME = re.compile(r"(午前|午後)?(\d{1,2})(?::(\d{2})|時(?![間限])(?:(半)|(\d{1,2})分)?)")
@@ -175,7 +181,14 @@ def datetime_hint(text: str, base: datetime) -> str:
     today = base.date()
     dates: list[str] = []
     taken: list[tuple[int, int]] = []
+    for m in _ISO_DATE.finditer(t):
+        taken.append(m.span())
+        got = _resolve_date(m.group(1), m.group(2), m.group(3), today)
+        if got:
+            dates.append(f"「{m.group(0)}」= {got.isoformat()}({WEEKDAYS_JA[got.weekday()]})")
     for m in _NUM_DATE.finditer(t):
+        if any(s <= m.start() < e for s, e in taken):
+            continue
         taken.append(m.span())
         got = _resolve_date(m.group(1), m.group(2), m.group(3), today)
         if got:
@@ -193,9 +206,11 @@ def datetime_hint(text: str, base: datetime) -> str:
     for m in _TIME.finditer(t):
         hour = int(m.group(2))
         minute = int(m.group(3) or m.group(5) or (30 if m.group(4) else 0))
-        if m.group(1) == "午後" and hour < 12:
+        if m.group(1) and hour >= 12:  # 午前12時・午後12時は正午とも深夜とも取れる（午後13時のような書き方もない）
+            continue
+        if m.group(1) == "午後":
             hour += 12
-        if hour > 24 or minute > 59:
+        if hour > 24 or minute > 59 or (hour == 24 and minute > 0):
             continue
         times.append(f"「{m.group(0)}」= {hour:02d}:{minute:02d}")
     dates, times = list(dict.fromkeys(dates))[:3], list(dict.fromkeys(times))[:3]

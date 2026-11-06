@@ -17,6 +17,7 @@ os.environ["AUDIENCE_ME"] = "add"
 os.environ["AUDIENCE_ALL"] = "add"
 os.environ["AUDIENCE_UNKNOWN"] = "add"
 os.environ["LLM_RUNTIME"] = "external"  # テストで同梱の Ollama をダウンロード・起動しない
+os.environ["LLM_RECHECK"] = "true"  # .env で聞き直しを止めていても、聞き直しのテストが既定（true）で動くようにする
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
